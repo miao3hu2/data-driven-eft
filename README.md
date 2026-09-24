@@ -1,0 +1,1 @@
+Note: I am currently making plan for api that handles the general computational task of coarsing graining a PDE into a large scale stochstic PDE, which is helpful for saving computational resources in simulation. Once the tentative api has been desigend, I will write an instruction document. 

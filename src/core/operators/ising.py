@@ -11,22 +11,11 @@ class NearestNeighbor(Operator):
     def evaluate(self, field: Field) -> np.ndarray:
 
         x = field.values
+        spatial_axes = field.spatial_axes
 
-        if field.batched:
-            _, *spatial_dims = field.shape
+        bonds = sum(x * np.roll(x, -1, axis=axis) for axis in spatial_axes)
 
-            num_spatial_dims = len(spatial_dims)
-
-            rolled_x = np.asarray([np.roll(x, -1, axis=i + 1) for i in range(num_spatial_dims)])
-
-            return np.sum(x * rolled_x, axis=tuple(i for i in range(num_spatial_dims+2) if i != 1))
-
-        else:
-            *spatial_dims, = field.shape
-            num_spatial_dims = len(spatial_dims)
-            rolled_x = np.asarray([np.roll(x, -1, axis=i) for i in range(num_spatial_dims)])
-
-            return np.asarray(np.sum(x * rolled_x))
+        return np.asarray(np.sum(bonds, axis=spatial_axes))
 
 
 class NextNearestNeighbor(Operator):
@@ -36,31 +25,16 @@ class NextNearestNeighbor(Operator):
     def evaluate(self, field: Field) -> np.ndarray:
 
         x = field.values
+        spatial_axes = field.spatial_axes
 
-        if field.batched:
-            _, *spatial_dims = field.shape
-            num_spatial_dims = len(spatial_dims)
-            if num_spatial_dims < 2:
-                raise ValueError("NextNearestNeighbor operator requires at least 2 spatial dimensions.")
+        if len(spatial_axes) < 2:
+            raise ValueError("NextNearestNeighbor operator requires at least 2 spatial dimensions.")
 
-            else:
-                axes = list(combinations(range(1, num_spatial_dims+1), 2))
+        axes = list(combinations(spatial_axes, 2))
 
-                diagonal_1 = np.asarray([np.roll(x, (-1, -1), axis = axis) for axis in axes])
-                diagonal_2 = np.asarray([np.roll(x, (-1, 1), axis = axis) for axis in axes])
+        bonds = sum(
+            x * np.roll(x, (-1, -1), axis=axis) + x * np.roll(x, (-1, 1), axis=axis)
+            for axis in axes
+        )
 
-                return np.sum(x * diagonal_1 + x * diagonal_2, axis = tuple(i for i in range(num_spatial_dims+2) if i != 1))
-
-        else:
-            *spatial_dims, = field.shape
-            num_spatial_dims = len(spatial_dims)
-            if num_spatial_dims < 2:
-                raise ValueError("NextNearestNeighbor operator requires at least 2 spatial dimensions.")
-
-            else:
-                axes = list(combinations(range(num_spatial_dims), 2))
-
-                diagonal_1 = np.asarray([np.roll(x, (-1, -1), axis = axis) for axis in axes])
-                diagonal_2 = np.asarray([np.roll(x, (-1, 1), axis = axis) for axis in axes])
-
-                return np.asarray(np.sum(x * diagonal_1 + x * diagonal_2))
+        return np.asarray(np.sum(bonds, axis=spatial_axes))

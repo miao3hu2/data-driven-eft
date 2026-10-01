@@ -42,8 +42,8 @@ class Ising2D:
 
         for _ in range(self.L * self.L):
 
-            i = self.rng.integers(self.L)
-            j = self.rng.integers(self.L)
+            i = int(self.rng.integers(self.L))
+            j = int(self.rng.integers(self.L))
 
             dE = self.energy_change(spins, i, j)
 

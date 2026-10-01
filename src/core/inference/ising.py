@@ -30,25 +30,15 @@ class InferK1(InferenceMethod):
             method="bounded",
         )
 
-        return CouplingsForOperators(basis, result.x, scale=field.scale)
+        return CouplingsForOperators(basis, result.x, scale=field.scale) # pyright: ignore[reportAttributeAccessIssue]
 
 
     def _neighbor_field(self, field: Field) -> np.ndarray:
 
         x = field.values
 
-        if field.batched:
-            _, *spatial_dims = field.shape
-            x_neighbor = np.zeros(x.shape, dtype=x.dtype)
-            for i in range(len(spatial_dims)):
-                x_neighbor += np.roll(x, 1, axis=i+1) + np.roll(x, -1, axis=i+1)
+        x_neighbor = np.zeros(x.shape, dtype=x.dtype)
+        for axis in field.spatial_axes:
+            x_neighbor += np.roll(x, 1, axis=axis) + np.roll(x, -1, axis=axis)
 
-            return x_neighbor
-
-        else:
-            *spatial_dims, = field.shape
-            x_neighbor = np.zeros(x.shape, dtype=x.dtype)
-            for i in range(len(spatial_dims)):
-                x_neighbor += np.roll(x, 1, axis=i) + np.roll(x, -1, axis=i)
-            
-            return x_neighbor
+        return x_neighbor

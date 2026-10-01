@@ -23,5 +23,8 @@ dev = [
     "ruff",
 ]
 
+[tool.pyright]
+typeCheckingMode = "basic"
+
 [tool.setuptools.packages.find]
 where = ["src"]

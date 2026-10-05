@@ -7,8 +7,7 @@ import numpy as np
 
 def _kept_slices(n: int, m: int) -> list[tuple[slice, slice]]:
     """Modes with |k| < m/2 out of n, as (slice in the length-n spectrum, slice in a length-m spectrum)
-    pairs: the non-negative modes 0, ..., n_pos - 1, then the negative modes -n_neg, ..., -1.
-    """
+    pairs: the non-negative modes 0, ..., n_pos - 1, then the negative modes -n_neg, ..., -1."""
     n_pos = (m + 1) // 2
     n_neg = (m - 1) // 2
     return [(slice(0, n_pos), slice(0, n_pos)), (slice(n - n_neg, n), slice(m - n_neg, m))]
@@ -16,8 +15,7 @@ def _kept_slices(n: int, m: int) -> list[tuple[slice, slice]]:
 
 @dataclass
 class BlockCutoffFilter(CoarseGrainer):
-    """Sharp spectral cutoff keeping |k| < k_max = pi / (block_size * dx) along every spatial axis.
-    """
+    """Sharp spectral cutoff keeping |k| < k_max = pi / (block_size * dx) along every spatial axis."""
     block_size: int = 2
 
     def transform(self, field: Field) -> Field:
@@ -25,20 +23,42 @@ class BlockCutoffFilter(CoarseGrainer):
         return self._apply(field, reduce_dim=True)
 
     def project(self, field: Field) -> Field:
-        """Zero the high modes but keep the original grid."""
+        """Zero the high modes but keep the original grid size."""
         return self._apply(field, reduce_dim=False)
+
+    def basis(self, field: Field) -> Field:
+        """Basis of the kept modes as a batched Field in the domain of field: values (n_kept, *spatial_shape)."""
+        kept = self._kept(field)
+        n_space = len(kept)
+        basis = np.ones((), dtype=complex)
+        for d, ((_, n, _, pairs), dx, k) in enumerate(zip(kept, field.scale, field.wavenumbers())):
+            idx = np.concatenate([np.arange(n)[s] for s, _ in pairs])
+            if field.domain == "fourier":
+                wave = np.eye(n, dtype=complex)[:, idx]
+            else:
+                wave = np.exp(1j * np.outer(np.arange(n) * dx, k[idx]))  # (n, n_kept on spatial axis d)
+            shape = [1] * (2 * n_space) 
+            shape[n_space + d], shape[d] = wave.shape # put n_kept_d on axis d and n_d on axis n_space + d
+            basis = basis * wave.T.reshape(shape) # shape = (1, ..., n_kept_d, ..., 1, n_d, ..., 1) 
+        values = basis.reshape(-1, *field.spatial_shape)
+        return Field(values=values, scale=field.scale, batched=True, domain=field.domain)
+
+    def _kept(self, field: Field) -> list[tuple[int, int, int, list[tuple[slice, slice]]]]:
+        """Per spatial axis: (axis, n, m, slice pairs) with m = n // block_size the coarse grid size."""
+        kept = []
+        for axis, n in zip(field.spatial_axes, field.spatial_shape):
+            m = n // self.block_size
+            if m < 1:
+                raise ValueError(f"block_size {self.block_size} is larger than the spatial axis of size {n}.")
+            kept.append((axis, n, m, _kept_slices(n, m)))
+        return kept
 
     def _apply(self, field: Field, reduce_dim: bool) -> Field:
         fourier = field.to_fourier()
         values = fourier.values
         ndim = values.ndim
 
-        kept = []  # per spatial axis: (axis, n, m, slice pairs)
-        for axis, n in zip(fourier.spatial_axes, fourier.spatial_shape):
-            m = n // self.block_size
-            if m < 1:
-                raise ValueError(f"block_size {self.block_size} is larger than the spatial axis of size {n}.")
-            kept.append((axis, n, m, _kept_slices(n, m)))
+        kept = self._kept(fourier)
 
         if reduce_dim:
             coarse_shape = list(values.shape)

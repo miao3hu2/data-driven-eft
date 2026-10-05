@@ -118,3 +118,62 @@ def test_fourier_input_is_not_mutated(method):
     before = field.values.copy()
     getattr(BlockCutoffFilter(block_size=2), method)(field)
     np.testing.assert_array_equal(field.values, before)
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+def test_basis_matches_inverse_fft_of_kept_modes(n, block_size):
+    # each basis function is the real-space image of a unit coefficient at a kept mode
+    field = Field(values=np.zeros((n, n + block_size)), scale=(1.0, 0.5))
+    basis = BlockCutoffFilter(block_size=block_size).basis(field)
+
+    # |k| < m / 2 along each axis: m modes for odd m, m - 1 for even m (the coarse Nyquist mode is dropped)
+    m = (n // block_size, (n + block_size) // block_size)
+    kept = [np.r_[0:(mi + 1) // 2, ni - (mi - 1) // 2:ni] for ni, mi in zip(field.shape, m)]
+    assert basis.shape == (len(kept[0]) * len(kept[1]), n, n + block_size)
+    assert basis.batched and basis.domain == "real" and basis.scale == field.scale
+
+    for col, (i, j) in enumerate((i, j) for i in kept[0] for j in kept[1]):
+        delta = np.zeros(field.shape, dtype=complex)
+        delta[i, j] = 1.0
+        expected = Field(values=delta, scale=field.scale, domain="fourier").to_real(real=False).values
+        np.testing.assert_allclose(basis.values[col], expected, atol=1e-12)
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+def test_projecting_onto_basis_matches_project(n, block_size):
+    f = BlockCutoffFilter(block_size=block_size)
+    field = Field(values=np.random.default_rng(5).normal(size=(n, n)), scale=1.0)
+
+    B = f.basis(field).values.reshape(-1, n * n).T
+    np.testing.assert_allclose(B.conj().T @ B, n * n * np.eye(B.shape[1]), atol=1e-9)
+
+    projected = B @ (B.conj().T @ field.values.ravel()) / (n * n)
+    np.testing.assert_allclose(projected.reshape(n, n), f.project(field).values, atol=1e-12)
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+def test_basis_is_returned_in_the_domain_of_the_field(n, block_size):
+    f = BlockCutoffFilter(block_size=block_size)
+    field = Field(values=np.random.default_rng(6).normal(size=(n, n + block_size)), scale=(1.0, 0.5))
+
+    real_basis = f.basis(field)
+    fourier_basis = f.basis(field.to_fourier())
+    assert real_basis.domain == "real"
+    assert fourier_basis.domain == "fourier"
+
+    # the Fourier-space basis is the transform of the real-space one: unit vectors at the kept modes
+    np.testing.assert_allclose(fourier_basis.values, real_basis.to_fourier().values, atol=1e-12)
+    np.testing.assert_allclose(fourier_basis.to_real(real=False).values, real_basis.values, atol=1e-12)
+    assert set(np.unique(fourier_basis.values)) <= {0, 1}
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+def test_projecting_onto_fourier_basis_matches_project(n, block_size):
+    f = BlockCutoffFilter(block_size=block_size)
+    field = Field(values=np.random.default_rng(7).normal(size=(n, n)), scale=1.0).to_fourier()
+
+    B = f.basis(field).values.reshape(-1, n * n).T
+    np.testing.assert_allclose(B.conj().T @ B, np.eye(B.shape[1]), atol=1e-12)
+
+    projected = B @ (B.conj().T @ field.values.ravel())
+    np.testing.assert_allclose(projected.reshape(n, n), f.project(field).values, atol=1e-12)

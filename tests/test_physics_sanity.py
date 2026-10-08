@@ -9,13 +9,18 @@ computes *something*, but no longer represents 2D Ising physics.
 """
 
 import numpy as np
-import pytest
 
+from core.coarse_graining.block import MajorityBlockSpin
 from core.data.base import Field
 from core.data.ising import Ising2D
-from core.coarse_graining.block import MajorityBlockSpin
 from core.operators.ising import NearestNeighbor, NextNearestNeighbor
 from evaluation.observables import magnetization, susceptibility
+
+
+def _total(field):
+    """Spatial sum of an operator's density field: the lattice bond sum."""
+    return field.values.sum(axis=field.spatial_axes)
+
 
 # Onsager's exact critical point for the 2D square-lattice Ising model
 # (J=1, no external field). Used only to pick beta values that are
@@ -46,14 +51,14 @@ def test_nearest_neighbor_invariant_under_global_spin_flip():
     spins = _random_spins((6, 6), seed=1)
     op = NearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=-spins, scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=-spins, scale=1.0)))
 
 
 def test_next_nearest_neighbor_invariant_under_global_spin_flip():
     spins = _random_spins((6, 6), seed=2)
     op = NextNearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=-spins, scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=-spins, scale=1.0)))
 
 
 # --- Translation invariance (periodic boundary conditions) -----------------
@@ -67,7 +72,7 @@ def test_nearest_neighbor_invariant_under_translation():
     shifted = np.roll(spins, shift=(2, 5), axis=(0, 1))
     op = NearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=shifted, scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=shifted, scale=1.0)))
 
 
 def test_next_nearest_neighbor_invariant_under_translation():
@@ -75,7 +80,7 @@ def test_next_nearest_neighbor_invariant_under_translation():
     shifted = np.roll(spins, shift=(1, 4), axis=(0, 1))
     op = NextNearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=shifted, scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=shifted, scale=1.0)))
 
 
 # --- Point-group symmetry of the square lattice -----------------------------
@@ -88,14 +93,14 @@ def test_nearest_neighbor_invariant_under_90_degree_rotation():
     spins = _random_spins((6, 6), seed=5)
     op = NearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=np.rot90(spins), scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=np.rot90(spins), scale=1.0)))
 
 
 def test_next_nearest_neighbor_invariant_under_90_degree_rotation():
     spins = _random_spins((6, 6), seed=6)
     op = NextNearestNeighbor()
 
-    assert op.evaluate(Field(values=spins, scale=1.0)) == op.evaluate(Field(values=np.rot90(spins), scale=1.0))
+    assert _total(op.evaluate(Field(values=spins, scale=1.0))) == _total(op.evaluate(Field(values=np.rot90(spins), scale=1.0)))
 
 
 # --- Exact bounds ------------------------------------------------------------
@@ -108,7 +113,7 @@ def test_nearest_neighbor_bond_sum_is_bounded_by_bond_count():
     spins = _random_spins((L, L), seed=7)
     op = NearestNeighbor()
 
-    assert abs(op.evaluate(Field(values=spins, scale=1.0))) <= 2 * L * L
+    assert abs(_total(op.evaluate(Field(values=spins, scale=1.0)))) <= 2 * L * L
 
 
 def test_magnetization_is_bounded():

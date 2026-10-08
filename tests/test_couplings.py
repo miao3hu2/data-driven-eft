@@ -10,7 +10,7 @@ class _StubOperator(Operator):
         self.name = name
 
     def evaluate(self, field):
-        return np.array(0.0)
+        return field
 
 
 def _basis(*names):

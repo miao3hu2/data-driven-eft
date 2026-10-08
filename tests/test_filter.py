@@ -177,3 +177,60 @@ def test_projecting_onto_fourier_basis_matches_project(n, block_size):
 
     projected = B @ (B.conj().T @ field.values.ravel())
     np.testing.assert_allclose(projected.reshape(n, n), f.project(field).values, atol=1e-12)
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+@pytest.mark.parametrize("domain", ["real", "fourier"])
+def test_basis_outer_product_is_the_projector(n, block_size, domain):
+    # B B^H, contracted over the mode (batch) axis, is the projector P[x, y, a, b] onto the kept modes
+    f = BlockCutoffFilter(block_size=block_size)
+    shape = (n, n + block_size)
+    field = Field(values=np.random.default_rng(8).normal(size=shape), scale=(1.0, 0.5))
+    if domain == "fourier":
+        field = field.to_fourier()
+
+    B = f.basis(field).values
+    N = shape[0] * shape[1]
+    P = np.einsum("kxy,kab->xyab", B, B.conj())
+    if domain == "real":
+        P /= N
+    M = P.reshape(N, N)
+
+    np.testing.assert_allclose(np.einsum("xyab,ab->xy", P, field.values), f.project(field).values, atol=1e-12)
+    np.testing.assert_allclose(M @ M, M, atol=1e-12)  # idempotent
+    np.testing.assert_allclose(M, M.conj().T, atol=1e-12)  # Hermitian
+    np.testing.assert_allclose(np.trace(M), B.shape[0], atol=1e-9)  # rank = n_kept
+
+    if domain == "real":
+        # a real convolution kernel: P[x, y, a, b] depends only on (x - a, y - b)
+        assert np.abs(M.imag).max() < 1e-12
+        np.testing.assert_allclose(np.roll(P, (3, 5, 3, 5), axis=(0, 1, 2, 3)), P, atol=1e-12)
+    else:
+        # the cutoff mask: diagonal with 1 at the kept modes and 0 elsewhere
+        np.testing.assert_allclose(M, np.diag(np.diag(M)), atol=1e-12)
+        assert set(np.unique(np.diag(M))) <= {0, 1}
+
+
+@pytest.mark.parametrize("n, block_size", SIZES)
+@pytest.mark.parametrize("domain", ["real", "fourier"])
+def test_inner_products_with_basis_are_the_kept_fourier_coefficients(n, block_size, domain):
+    f = BlockCutoffFilter(block_size=block_size)
+    shape = (n, n + block_size)
+    field = Field(values=np.random.default_rng(9).normal(size=shape), scale=(1.0, 0.5))
+    fourier = field.to_fourier()
+    if domain == "fourier":
+        field = fourier
+
+    # <phi_k, u>, with the 1 / N of the "forward" normalization in real space
+    coeffs = np.einsum("kxy,xy->k", f.basis(field).values.conj(), field.values)
+    if domain == "real":
+        coeffs /= shape[0] * shape[1]
+
+    m = [ni // block_size for ni in shape]
+    fine = [np.r_[0:(mi + 1) // 2, ni - (mi - 1) // 2:ni] for ni, mi in zip(shape, m)]
+    coarse = [np.r_[0:(mi + 1) // 2, mi - (mi - 1) // 2:mi] for mi in m]
+    coeffs = coeffs.reshape(len(fine[0]), len(fine[1]))
+    np.testing.assert_allclose(coeffs, fourier.values[np.ix_(*fine)], atol=1e-12)
+    # the same coefficients sit at the kept modes of the coarse grid, with no rescaling
+    coarse_fourier = f.transform(field).to_fourier().values
+    np.testing.assert_allclose(coeffs, coarse_fourier[np.ix_(*coarse)], atol=1e-12)

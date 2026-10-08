@@ -8,21 +8,21 @@ class NearestNeighbor(Operator):
 
     name = "K1"
 
-    def evaluate(self, field: Field) -> np.ndarray:
+    def evaluate(self, field: Field) -> Field:
 
         x = field.values
         spatial_axes = field.spatial_axes
 
         bonds = sum(x * np.roll(x, -1, axis=axis) for axis in spatial_axes)
 
-        return np.asarray(np.sum(bonds, axis=spatial_axes))
+        return field.replace(values=np.asarray(bonds))
 
 
 class NextNearestNeighbor(Operator):
 
     name = "K2"
 
-    def evaluate(self, field: Field) -> np.ndarray:
+    def evaluate(self, field: Field) -> Field:
 
         x = field.values
         spatial_axes = field.spatial_axes
@@ -37,4 +37,4 @@ class NextNearestNeighbor(Operator):
             for axis in axes
         )
 
-        return np.asarray(np.sum(bonds, axis=spatial_axes))
+        return field.replace(values=np.asarray(bonds))

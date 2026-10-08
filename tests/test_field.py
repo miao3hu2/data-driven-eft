@@ -131,5 +131,5 @@ def test_fourier_round_trip_recovers_real_field():
     field = Field(values=values, scale=0.5, batched=True)
     back = field.to_fourier().to_real(real=False)
     # exact up to floating-point roundoff, with a negligible imaginary part
-    np.testing.assert_allclose(back.values.real, values, atol=1e-12)
-    assert np.abs(back.values.imag).max() < 1e-12
+    np.testing.assert_allclose(np.real(back.values), values, atol=1e-12)
+    assert np.abs(np.imag(back.values)).max() < 1e-12

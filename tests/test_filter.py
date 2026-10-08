@@ -65,6 +65,53 @@ def test_fourier_input_stays_in_fourier_domain():
     assert coarse.values.shape == (4, 4)
 
 
+def test_odd_grid_stores_one_point_per_kept_mode():
+    L = 16
+    low = lambda x, y: np.cos(2 * np.pi / L * x) + 0.5 * np.cos(2 * np.pi / L * (2 * x + 3 * y))
+    high = _plane_waves(L, [(0.7, 6, 0), (0.3, 4, 1)])  # |mode| >= L / (2 * 2) = 4, removed (4 is the coarse Nyquist)
+    x = np.arange(L)
+    field = Field(values=low(*np.meshgrid(x, x, indexing="ij")) + high, scale=1.0)
+
+    coarse = BlockCutoffFilter(block_size=2, odd_grid=True).transform(field)
+
+    assert coarse.values.shape == (7, 7)
+    assert coarse.scale == (16 / 7, 16 / 7)
+    assert not np.iscomplexobj(coarse.values)
+    # the low-mode signal sampled on the odd grid, whose points are not fine grid points
+    xc = np.arange(7) * 16 / 7
+    np.testing.assert_allclose(coarse.values, low(*np.meshgrid(xc, xc, indexing="ij")), atol=1e-12)
+
+
+def test_odd_grid_holds_the_same_modes_without_the_nyquist_slot():
+    field = Field(values=np.random.default_rng(2).normal(size=(3, 12, 8)), scale=1.0, batched=True).to_fourier()
+    odd = BlockCutoffFilter(block_size=2, odd_grid=True).transform(field)
+    even = BlockCutoffFilter(block_size=2).transform(field)
+
+    assert odd.values.shape == (3, 5, 3)  # coarse sizes 6 and 4 lose their Nyquist slot
+    np.testing.assert_array_equal(odd.values, even.values[:, [0, 1, 2, 4, 5]][:, :, [0, 1, 3]])
+    np.testing.assert_array_equal(np.delete(even.values, 3, axis=1)[:, :, 2], 0)
+    # project and basis only depend on the kept modes, not on the grid that stores them
+    np.testing.assert_array_equal(
+        BlockCutoffFilter(block_size=2, odd_grid=True).project(field).values, BlockCutoffFilter(block_size=2).project(field).values
+    )
+
+
+def test_odd_grid_keeps_every_mode_of_an_odd_grid():
+    field = Field(values=np.random.default_rng(3).normal(size=(7, 7)), scale=1.0)
+    np.testing.assert_allclose(BlockCutoffFilter(block_size=1, odd_grid=True).transform(field).values, field.values)
+    np.testing.assert_allclose(BlockCutoffFilter(block_size=1).transform(field).values, field.values)
+
+
+def test_odd_grid_transforms_compose_on_power_of_two_grids():
+    field = Field(values=np.random.default_rng(4).normal(size=(32, 32)), scale=1.0)
+    f = BlockCutoffFilter(block_size=2, odd_grid=True)
+    twice = f.transform(f.transform(field))
+    once = BlockCutoffFilter(block_size=4, odd_grid=True).transform(field)
+    assert twice.values.shape == once.values.shape == (7, 7)
+    np.testing.assert_allclose(twice.values, once.values, atol=1e-12)
+    np.testing.assert_allclose(twice.scale, once.scale)
+
+
 def test_block_size_larger_than_axis_raises():
     with pytest.raises(ValueError):
         BlockCutoffFilter(block_size=8).transform(Field(values=np.zeros((4, 4)), scale=1.0))

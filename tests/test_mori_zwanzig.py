@@ -87,13 +87,15 @@ def test_projection_uses_time_zero_basis():
     t0 = field.replace(values=field.values[:, 0], time=None)
     np.testing.assert_allclose(projection.basis(), Projection(BlockCutoffFilter(block_size=2), t0).basis())
 
-    c = projection.coefficients(field)
-    assert c.shape == (9, 3, 8, 8)  # (n_modes, n_time, *spatial Fourier modes)
-    np.testing.assert_allclose(_kept_modes(c[:, 0]).reshape(9, 9), np.eye(9), atol=1e-10)  # x(0) lies in the span
+    c = projection.coefficients(field)  # fitted at t = 0
+    assert c.shape == (9, 8, 8)  # (n_modes, *spatial Fourier modes)
+    np.testing.assert_allclose(_kept_modes(c).reshape(9, 9), np.eye(9), atol=1e-10)  # x(0) lies in the span
 
+    # P x reproduces the kept modes of the state at every time step (the other modes only get sampling noise)
     projected = projection.evaluate(field)
     assert projected.shape == (500, 3, 8, 8)
     np.testing.assert_array_equal(projected.time, field.time)
+    np.testing.assert_allclose(_kept_modes(projected.to_fourier().values), _kept_modes(field.to_fourier().values), atol=1e-10)
 
 
 def test_projection_is_real_only_for_real_field_and_operator():
@@ -179,9 +181,9 @@ def test_homogeneous_projection_keeps_time_and_fourier_layout():
     field = _random_field(rng, n_time=3)
     homogeneous = Projection(BlockCutoffFilter(block_size=2), field, homogeneous=True)
 
-    c = homogeneous.coefficients(field)
-    assert c.shape == (9, 1, 3)  # (n_wavenumbers, n_components, n_time)
-    np.testing.assert_allclose(c[:, 0, 0], 1, atol=1e-10)  # x(0) is the basis itself
+    c = homogeneous.coefficients(field)  # fitted at t = 0
+    assert c.shape == (9, 1)  # (n_wavenumbers, n_components)
+    np.testing.assert_allclose(c[:, 0], 1, atol=1e-10)  # x(0) is the basis itself
 
     projected = homogeneous.evaluate(field.to_fourier())
     assert projected.domain == "fourier" and projected.shape == (500, 3, 8, 8)
@@ -189,9 +191,7 @@ def test_homogeneous_projection_keeps_time_and_fourier_layout():
     outside = np.ones((8, 8), dtype=bool)
     outside[np.ix_(KEPT, KEPT)] = False
     np.testing.assert_array_equal(projected.values[:, :, outside], 0)
-    np.testing.assert_allclose(
-        _kept_modes(projected.values[:, 0]), _kept_modes(field.to_fourier().values[:, 0]), atol=1e-10
-    )
+    np.testing.assert_allclose(_kept_modes(projected.values), _kept_modes(field.to_fourier().values), atol=1e-10)
 
 
 def test_homogeneous_projection_needs_the_ensemble_grid():
@@ -201,3 +201,65 @@ def test_homogeneous_projection_needs_the_ensemble_grid():
     coarse = BlockCutoffFilter(block_size=2).transform(field)
     with pytest.raises(ValueError, match="grid"):
         homogeneous.evaluate(coarse)
+
+
+@pytest.mark.parametrize("homogeneous", [False, True])
+@pytest.mark.parametrize("n_components", [0, 1])
+def test_evaluate_applies_the_time_zero_coefficients_at_every_time_step(homogeneous, n_components):
+    rng = np.random.default_rng(11)
+    shape = (500, 3, 8, 8) if n_components == 0 else (500, 3, 8, 8, 2)
+    states = Field(values=rng.normal(size=shape), scale=1.0, batched=True, time=np.arange(3), n_components=n_components)
+    op_field = states.replace(values=states.values ** 2 + np.roll(states.values, 1, axis=2))
+    projection = Projection(BlockCutoffFilter(block_size=2), states, homogeneous=homogeneous)
+
+    projected = projection.evaluate(op_field)
+    assert projected.shape == states.shape and projected.domain == "real" and not np.iscomplexobj(projected.values)
+    np.testing.assert_array_equal(projected.time, states.time)
+    # O after t = 0 does not enter: P is fitted at t = 0 only
+    changed = op_field.replace(values=np.concatenate([op_field.values[:, :1], rng.normal(size=(500, 2, *shape[2:]))], 1))
+    np.testing.assert_array_equal(projection.evaluate(changed).values, projected.values)
+    # at t = 0 it is the projection of O at t = 0
+    initial = op_field.replace(values=op_field.values[:, 0], time=None)
+    np.testing.assert_allclose(projected.values[:, 0], projection.evaluate(initial).values, atol=1e-10)
+    # at later t, the same coefficients multiply the modes of the later states
+    later = Projection(BlockCutoffFilter(block_size=2), initial.replace(values=states.values[:, 2]), homogeneous=homogeneous)
+    c = projection.coefficients(initial)
+    at_2 = initial.replace(values=projected.values[:, 2])
+    if homogeneous:
+        expected = np.einsum("bki,kij->bkj", later._wavenumber_basis(), c.reshape(*c.shape[:2], -1))
+        np.testing.assert_allclose(projection._modes(at_2), expected.reshape(500, -1), atol=1e-10)
+    else:
+        expected = np.tensordot(later._basis, c, axes=([-1], [0]))
+        np.testing.assert_allclose(at_2.to_fourier().values, expected, atol=1e-10)
+    # time steps of op_field pick the matching states
+    assert op_field.time is not None
+    np.testing.assert_allclose(
+        projection.evaluate(op_field.replace(values=op_field.values[:, :2], time=op_field.time[:2])).values,
+        projected.values[:, :2],
+    )
+
+
+def test_evaluate_needs_time_steps_of_the_ensemble_from_its_first():
+    rng = np.random.default_rng(13)
+    states = _random_field(rng, n_time=3)
+    assert states.time is not None
+    projection = Projection(BlockCutoffFilter(block_size=2), states)
+    with pytest.raises(ValueError, match="time steps"):
+        projection.evaluate(states.replace(values=states.values[:, 1:], time=states.time[1:]))
+    with pytest.raises(ValueError, match="time steps"):
+        projection.evaluate(states.replace(time=states.time + 0.5))
+    initial = states.replace(values=states.values[:, 0], time=None)
+    with pytest.raises(ValueError, match="no trajectories"):
+        Projection(BlockCutoffFilter(block_size=2), initial).evaluate(states)
+
+
+def test_projection_is_estimated_on_the_initial_states_only():
+    rng = np.random.default_rng(12)
+    states = _random_field(rng, n_time=3)
+    assert states.time is not None
+    first = states.replace(values=states.values[:, :1], time=states.time[:1])
+    for homogeneous in (False, True):
+        np.testing.assert_array_equal(
+            Projection(BlockCutoffFilter(block_size=2), states, homogeneous=homogeneous).gram,
+            Projection(BlockCutoffFilter(block_size=2), first, homogeneous=homogeneous).gram,
+        )

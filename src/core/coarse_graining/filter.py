@@ -5,18 +5,25 @@ from core.data.base import Field
 import numpy as np
 
 
-def _kept_slices(n: int, m: int) -> list[tuple[slice, slice]]:
-    """Modes with |k| < m/2 out of n, as (slice in the length-n spectrum, slice in a length-m spectrum)
-    pairs: the non-negative modes 0, ..., n_pos - 1, then the negative modes -n_neg, ..., -1."""
+def _kept_slices(n: int, m: int, m_out: int | None = None) -> list[tuple[slice, slice]]:
+    """Modes with |k| < m/2 out of n, as (slice in the length-n spectrum, slice in a length-m_out spectrum)
+    pairs: the non-negative modes 0, ..., n_pos - 1, then the negative modes -n_neg, ..., -1. m_out defaults to m."""
+    m_out = m if m_out is None else m_out
     n_pos = (m + 1) // 2
     n_neg = (m - 1) // 2
-    return [(slice(0, n_pos), slice(0, n_pos)), (slice(n - n_neg, n), slice(m - n_neg, m))]
+    return [(slice(0, n_pos), slice(0, n_pos)), (slice(n - n_neg, n), slice(m_out - n_neg, m_out))]
 
 
 @dataclass
 class BlockCutoffFilter(CoarseGrainer):
-    """Sharp spectral cutoff keeping |k| < k_max = pi / (block_size * dx) along every spatial axis."""
+    """
+    Sharp spectral cutoff keeping |k| < k_max = pi / (block_size * dx) along every spatial axis.
+
+    The cutoff never keeps the coarse Nyquist mode. With odd_grid=True the grid has exactly
+    one point per kept mode (m - 1 points for even m)
+    """
     block_size: int = 2
+    odd_grid: bool = False
 
     def transform(self, field: Field) -> Field:
         """Keep only the low modes and put them on a grid block_size times coarser."""
@@ -44,13 +51,14 @@ class BlockCutoffFilter(CoarseGrainer):
         return Field(values=values, scale=field.scale, batched=True, domain=field.domain)
 
     def _kept(self, field: Field) -> list[tuple[int, int, int, list[tuple[slice, slice]]]]:
-        """Per spatial axis: (axis, n, m, slice pairs) with m = n // block_size the coarse grid size."""
+        """Per spatial axis: (axis, n, m, slice pairs) with m the coarse grid size: n // block_size, or the number of kept modes with odd_grid=True."""
         kept = []
         for axis, n in zip(field.spatial_axes, field.spatial_shape):
             m = n // self.block_size
             if m < 1:
                 raise ValueError(f"block_size {self.block_size} is larger than the spatial axis of size {n}.")
-            kept.append((axis, n, m, _kept_slices(n, m)))
+            m_out = (m + 1) // 2 + (m - 1) // 2 if self.odd_grid else m
+            kept.append((axis, n, m_out, _kept_slices(n, m, m_out)))
         return kept
 
     def _apply(self, field: Field, reduce_dim: bool) -> Field:

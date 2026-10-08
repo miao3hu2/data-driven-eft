@@ -4,14 +4,6 @@ from core.data.base import Field
 from core.operators.base import Operator
 
 
-class Liouville(Operator):
-    name = "L"
-
-    def evaluate(self, field: Field) -> Field:
-        """Compute the Liouville operator L g(x) = {H, g(x)} for a field g(x) on the original grid."""
-        raise NotImplementedError("Liouville operator is not implemented yet.")
-
-
 class Projection(Operator):
     """Linear projection onto the resolved Fourier modes a_k = (filtered ensemble at time 0)_k.
 
@@ -38,17 +30,30 @@ class Projection(Operator):
         field = self.ensemble
         if field.has_time:
             field = field.replace(values=field.values[:, 0], time=None)
-        values = field.to_fourier().values
-        for axis, idx in zip(field.spatial_axes, self._kept_indices(field)):
-            values = np.take(values, idx, axis=axis)
-        return values.reshape(values.shape[0], -1)
+        return self._modes(field)
 
     def evaluate(self, field: Field) -> Field:
-        coeffs = self.coefficients(field)
+        initial, states = field, self.ensemble
+        if field.has_time:
+            initial = field.replace(values=field.values[:, 0], time=None)
+            states = states.replace(values=states.values[:, self._time_indices(field)], time=field.time)
+        elif states.has_time:
+            states = states.replace(values=states.values[:, 0], time=None)
+
+        coeffs = self.coefficients(initial)
+        a = self._modes(states)  # (*lead, n_modes)
+        lead = a.shape[:-1]
         if self.homogeneous:
-            projected = self._evaluate_by_wavenumber(field, coeffs)
+            kept = self._kept_indices(initial)
+            kept_shape = tuple(len(idx) for idx in kept)
+            rest_shape = coeffs.shape[2:]
+            a = a.reshape(*lead, -1, coeffs.shape[1])
+            projected = np.einsum("...ki,kir->...kr", a, coeffs.reshape(*coeffs.shape[:2], -1))
+            full = np.zeros((*lead, *initial.spatial_shape, *rest_shape), dtype=projected.dtype)
+            full[(*[slice(None)] * len(lead), *np.ix_(*kept))] = projected.reshape(*lead, *kept_shape, *rest_shape)
+            projected = full
         else:
-            projected = np.tensordot(self._basis, coeffs, axes=([-1], [0]))
+            projected = np.tensordot(a, coeffs, axes=([-1], [0]))
         result = field.to_fourier().replace(values=projected)
         if field.domain == "real":
             real = not np.iscomplexobj(field.values) and self._is_real(self.ensemble)
@@ -59,6 +64,8 @@ class Projection(Operator):
         n_batch = self._basis.shape[0]
         if not op_field.batched or op_field.shape[0] != n_batch:
             raise ValueError(f"op_field must be batched over the {n_batch} ensemble members, got shape {op_field.shape}.")
+        if op_field.has_time:
+            op_field = op_field.replace(values=op_field.values[:, 0], time=None)
 
         values = op_field.to_fourier().values
         if self.homogeneous:
@@ -72,6 +79,27 @@ class Projection(Operator):
 
         coeffs, *_ = np.linalg.lstsq(self.gram, inner, rcond=None)
         return coeffs.reshape(-1, *op_shape)
+
+    def _time_indices(self, field: Field) -> np.ndarray:
+        """Indices into the ensemble's time axis of the time steps of field, which must start at the ensemble's first."""
+        times, field_times = self.ensemble.time, field.time
+        if times is None:
+            raise ValueError("field has a time axis, but the ensemble has no trajectories to evaluate P O along.")
+        assert field_times is not None
+        idx = np.searchsorted(times, field_times)
+        if (
+            np.any(idx >= len(times))
+            or not np.array_equal(times[idx], field_times)
+            or field_times[0] != times[0]
+        ):
+            raise ValueError(f"the time steps of field must be time steps of the ensemble starting at t = {times[0]}.")
+        return idx
+
+    def _modes(self, field: Field) -> np.ndarray:
+        values = field.to_fourier().values
+        for axis, idx in zip(field.spatial_axes, self._kept_indices(field)):
+            values = np.take(values, idx, axis=axis)
+        return values.reshape(*field.lead_shape, -1)
 
     def _kept_indices(self, field: Field) -> list[np.ndarray]:
         """Indices of the kept modes along each spatial axis of field."""
@@ -94,19 +122,6 @@ class Projection(Operator):
         kept_shape = values.shape[1:1 + len(axes)]
         rest_shape = values.shape[1 + len(axes):]
         return values.reshape(values.shape[0], int(np.prod(kept_shape)), -1), rest_shape
-
-    def _evaluate_by_wavenumber(self, op_field: Field, coeffs: np.ndarray) -> np.ndarray:
-        a = self._wavenumber_basis()
-        n_batch = a.shape[0]
-        kept = self._kept_indices(op_field)
-        kept_shape = tuple(len(idx) for idx in kept)
-        rest_shape = coeffs.shape[2:]
-        projected = np.einsum("bki,kir->bkr", a, coeffs.reshape(*coeffs.shape[:2], -1))
-
-        axes = op_field.spatial_axes
-        full = np.zeros((n_batch, *op_field.spatial_shape, *rest_shape), dtype=projected.dtype)
-        full[(slice(None), *np.ix_(*kept))] = projected.reshape(n_batch, *kept_shape, *rest_shape)
-        return np.moveaxis(full, range(1, 1 + len(axes)), axes)
 
     @staticmethod
     def _is_real(field: Field) -> bool:

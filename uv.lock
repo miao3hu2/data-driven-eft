@@ -488,7 +488,7 @@ wheels = [
 ]
 
 [[package]]
-name = "data-driven-rg"
+name = "data-driven-eft"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

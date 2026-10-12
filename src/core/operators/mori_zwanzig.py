@@ -1,3 +1,4 @@
+from functools import cached_property
 import numpy as np
 from core.coarse_graining.filter import BlockCutoffFilter
 from core.data.base import Field
@@ -57,6 +58,7 @@ class Projection(Operator):
             self.gram = np.einsum("bki,bkj->kij", a.conj(), a) / n_batch # using homogeneity: different wavenumbers are uncorrelated, so G is block diagonal with one block per wavenumber
         else:
             self.gram = self._basis.conj().T @ self._basis / n_batch
+        self._gram_pinv = np.linalg.pinv(self.gram, hermitian=True)
 
     def basis(self) -> np.ndarray:
         field = self.features
@@ -64,17 +66,25 @@ class Projection(Operator):
             field = field.replace(values=field.values[:, 0], time=None)
         return self._modes(field)
 
+    @cached_property
+    def _feature_modes(self) -> np.ndarray:
+        return self._modes(self.features)
+
     def evaluate(self, field: Field) -> Field:
-        initial, states = field, self.features
+        return self.apply(field, self.coefficients(field))
+
+    def apply(self, field: Field, coeffs: np.ndarray) -> Field:
+        initial = field
         if field.has_time:
             initial = field.replace(values=field.values[:, 0], time=None)
-            states = states.replace(values=states.values[:, self._time_indices(field)], time=field.time)
-        elif states.has_time:
-            states = states.replace(values=states.values[:, 0], time=None)
+            modes = self._feature_modes[:, self._time_indices(field)]
+        elif self.features.has_time:
+            modes = self._feature_modes[:, 0]
+        else:
+            modes = self._feature_modes
 
-        coeffs = self.coefficients(initial)
         projected = apply_coefficients(
-            self._modes(states), coeffs, self._kept_indices(initial), initial.spatial_shape, self.homogeneous
+            modes, coeffs, self._kept_indices(initial), initial.spatial_shape, self.homogeneous
         )
         result = field.to_fourier().replace(values=projected)
         if field.domain == "real":
@@ -93,13 +103,12 @@ class Projection(Operator):
         if self.homogeneous:
             modes, rest_shape = self._wavenumber_modes(op_field, values)
             inner = np.einsum("bki,bkr->kir", self._wavenumber_basis().conj(), modes) / n_batch
-            coeffs = np.linalg.pinv(self.gram, hermitian=True) @ inner
+            coeffs = self._gram_pinv @ inner
             return coeffs.reshape(*coeffs.shape[:2], *rest_shape)
 
         op_shape = values.shape[1:]
         inner = self._basis.conj().T @ values.reshape(n_batch, -1) / n_batch  # (n_modes, prod(op_shape))
-
-        coeffs, *_ = np.linalg.lstsq(self.gram, inner, rcond=None)
+        coeffs = self._gram_pinv @ inner
         return coeffs.reshape(-1, *op_shape)
 
     def wavevectors(self) -> np.ndarray:

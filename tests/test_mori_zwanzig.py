@@ -3,7 +3,7 @@ import pytest
 
 from core.coarse_graining.filter import BlockCutoffFilter
 from core.data.base import Field
-from core.operators.base import Operator
+from core.operators.base import Identity, Operator, OperatorBasis
 from core.operators.ising import NearestNeighbor
 from core.operators.mori_zwanzig import Projection
 
@@ -263,3 +263,77 @@ def test_projection_is_estimated_on_the_initial_states_only():
             Projection(BlockCutoffFilter(block_size=2), states, homogeneous=homogeneous).gram,
             Projection(BlockCutoffFilter(block_size=2), first, homogeneous=homogeneous).gram,
         )
+
+
+class _Square(Operator):
+    name = "u2"
+
+    def evaluate(self, field):
+        return field.replace(values=field.values ** 2)
+
+
+@pytest.mark.parametrize("homogeneous", [False, True])
+def test_identity_operator_basis_is_the_default_projection(homogeneous):
+    rng = np.random.default_rng(14)
+    field = _random_field(rng, n_time=3)
+    op_field = field.replace(values=field.values ** 2)
+    default = Projection(BlockCutoffFilter(block_size=2), field, homogeneous=homogeneous)
+    identity = Projection(BlockCutoffFilter(block_size=2), field, homogeneous=homogeneous, operators=OperatorBasis([Identity()]))
+    np.testing.assert_allclose(identity.gram, default.gram)
+    np.testing.assert_allclose(identity.evaluate(op_field).values, default.evaluate(op_field).values)
+
+
+@pytest.mark.parametrize("homogeneous", [False, True])
+def test_projection_on_nonlinear_operators_reproduces_their_combination(homogeneous):
+    rng = np.random.default_rng(15)
+    field = _random_field(rng, n_time=2, n=7)  # odd grid: every mode is kept with block_size 1
+    operators = OperatorBasis([Identity(), _Square()])
+    projection = Projection(BlockCutoffFilter(block_size=1), field, homogeneous=homogeneous, operators=operators)
+    target = field.replace(values=0.5 * field.values - 2.0 * field.values ** 2)
+
+    np.testing.assert_allclose(projection.evaluate(target).values, target.values, atol=1e-10)
+    coeffs = projection.coefficients(target)
+    if homogeneous:
+        # per wavevector, one coefficient for each operator: (n_wavevectors, n_operators * n_components)
+        assert coeffs.shape == (49, 2)
+        np.testing.assert_allclose(coeffs[:, 0], 0.5, atol=1e-10)
+        np.testing.assert_allclose(coeffs[:, 1], -2.0, atol=1e-10)
+    else:
+        # every mode of O_i to every mode of the target: 0.5 or -2 on the diagonal
+        assert coeffs.shape == (98, 7, 7)
+        coeffs = coeffs.reshape(49, 2, 49)
+        np.testing.assert_allclose(coeffs[:, 0], 0.5 * np.eye(49), atol=1e-10)
+        np.testing.assert_allclose(coeffs[:, 1], -2.0 * np.eye(49), atol=1e-10)
+
+
+def test_wavevectors_follow_the_basis_order():
+    field = _random_field(np.random.default_rng(16), n_batch=20)
+    projection = Projection(BlockCutoffFilter(block_size=2), field, homogeneous=True)
+    k = 2 * np.pi / 8 * np.array([0, 1, -1])
+    np.testing.assert_allclose(projection.wavevectors(), np.stack(np.meshgrid(k, k, indexing="ij"), -1).reshape(-1, 2))
+
+
+def test_operators_must_keep_the_ensemble_layout():
+    field = _random_field(np.random.default_rng(17), n_batch=20)
+    with pytest.raises(ValueError, match="layout"):
+        Projection(BlockCutoffFilter(block_size=2), field, operators=OperatorBasis([_Coarsening()]))
+
+
+class _Coarsening(Operator):
+    name = "coarse"
+
+    def evaluate(self, field):
+        return BlockCutoffFilter(block_size=2).transform(field)
+
+
+class _ToFourier(Operator):
+    name = "fourier"
+
+    def evaluate(self, field):
+        return field.to_fourier()
+
+
+def test_operators_must_keep_the_ensemble_domain():
+    field = _random_field(np.random.default_rng(18), n_batch=20)
+    with pytest.raises(ValueError, match="domain"):
+        Projection(BlockCutoffFilter(block_size=2), field, operators=OperatorBasis([Identity(), _ToFourier()]))

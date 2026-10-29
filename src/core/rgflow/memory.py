@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 from core.coarse_graining.filter import BlockCutoffFilter
 from core.data.base import Field
+from core.inference.mori_kernels import MemoryKernels, Origins, mori_kernels_level
 from core.inference.mori_zwanzig import MoriZwanzigData, check_trajectories, mori_zwanzig_level
 from core.operators.base import OperatorBasis
 
@@ -106,4 +107,32 @@ def mori_zwanzig_data(
             coarse = coarse.to_real(real=not np.iscomplexobj(field.values))
         k_max = tuple(np.pi / (block_size**level * dx) for dx in field.scale)
         data.append(mori_zwanzig_level(coarse, basis, homogeneous, level=level, block_size=block_size**level, k_max=k_max))
+    return data
+
+
+def mori_kernel_data(
+    field: Field,
+    n_levels: int,
+    block_size: int = 2,
+    homogeneous: bool = True,
+    odd_grid: bool = True,
+    basis: OperatorBasis | None = None,
+    n_lags: int | None = None,
+    origins: Origins = "initial",
+    rcond: float = 1e-10,
+) -> list[MemoryKernels]:
+    """Markov and memory kernels from two-time correlations for every level of coarse-graining of field."""
+    fourier = field.to_fourier()
+    data = []
+    for level in range(1, n_levels + 1):
+        coarse = BlockCutoffFilter(block_size=block_size**level, odd_grid=odd_grid).transform(fourier)
+        if field.domain == "real":
+            coarse = coarse.to_real(real=not np.iscomplexobj(field.values))
+        k_max = tuple(np.pi / (block_size**level * dx) for dx in field.scale)
+        data.append(
+            mori_kernels_level(
+                coarse, basis, homogeneous, n_lags, origins, rcond,
+                level=level, block_size=block_size**level, k_max=k_max,
+            )
+        )
     return data

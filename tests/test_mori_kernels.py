@@ -164,3 +164,28 @@ def test_rejects_unequal_time_steps():
     field = _trajectories(rng, n_batch=10, n_time=3)
     with pytest.raises(ValueError, match="equally spaced"):
         mori_kernels_level(field.replace(time=np.array([0.0, 1.0, 3.0])))
+
+
+def test_round_off_block_gets_zero_kernels():
+    """A wavevector whose observables are round-off (a conserved zero mean) is not inverted: its kernels are 0, while a
+    cutoff relative to its own block would turn the round-off into kernels of order 1."""
+    rng = np.random.default_rng(7)
+    g = rng.normal(size=(50, 4, 2, 1)) + 1j * rng.normal(size=(50, 4, 2, 1))
+    g[:, :, 1] *= 1e-17
+    omega = memory_kernels(two_time_correlations(g))
+    assert np.all(omega[:, 1] == 0)
+    assert np.all(np.abs(omega[0, 0]) > 0)
+
+
+@pytest.mark.parametrize("homogeneous", [True, False])
+def test_precomputed_observables_give_the_same_kernels(homogeneous):
+    """Observables passed in are used as they are, and must have the layout of observables(u, basis)."""
+    rng = np.random.default_rng(5)
+    coarse = COARSE.transform(_trajectories(rng, n_batch=50, n_time=5)).to_real()
+    basis = OperatorBasis([Identity(), Identity()])
+    g = observables(coarse, basis, homogeneous)
+    fitted = mori_kernels_level(coarse, basis, homogeneous, g=g)
+    np.testing.assert_allclose(fitted.kernels, mori_kernels_level(coarse, basis, homogeneous).kernels)
+    np.testing.assert_allclose(fitted.wavevectors, mori_kernels_level(coarse, basis, homogeneous).wavevectors)
+    with pytest.raises(ValueError, match="must have the shape"):
+        mori_kernels_level(coarse, basis, homogeneous, g=g[..., :1])

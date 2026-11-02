@@ -94,9 +94,17 @@ def two_time_correlations(g: np.ndarray, n_lags: int | None = None, origins: Ori
     return np.stack(per_origin).mean(axis=0) / len(g)
 
 
+def covariance_inverse(C0: np.ndarray, rcond: float = 1e-10) -> np.ndarray:
+    """Pseudo-inverse of the Hermitian blocks C0 (K, M, M), on the directions whose variance exceeds rcond times the largest variance over all blocks."""
+    variances, vectors = np.linalg.eigh(C0)  # (K, M), (K, M, M)
+    kept = variances > rcond * variances.max()
+    inverse = np.where(kept, 1 / np.where(kept, variances, 1), 0)
+    return (vectors * inverse[..., None, :]) @ vectors.conj().swapaxes(-1, -2)
+
+
 def memory_kernels(C: np.ndarray, rcond: float = 1e-10) -> np.ndarray:
     """Omega^(0..n_lags-1) from the correlations C(0..n_lags) (n_lags + 1, K, M, M) by the recursion C(n+1) = sum_{l=0..n} Omega^(l) C(n-l)."""
-    C0_inv = np.linalg.pinv(C[0], rcond=rcond, hermitian=True)
+    C0_inv = covariance_inverse(C[0], rcond)
     omega = []
     for n in range(len(C) - 1):
         omega.append((C[n + 1] - sum(omega[l] @ C[n - l] for l in range(n))) @ C0_inv)
@@ -113,14 +121,20 @@ def mori_kernels_level(
     level: int = 0,
     block_size: int = 1,
     k_max: tuple[float, ...] | None = None,
+    g: np.ndarray | None = None,
 ) -> MemoryKernels:
     """The kernels of trajectories u (batch, time, ...) resolved on their own grid, with equally spaced snapshots."""
     dt = _check_trajectories(u)
     operators = OperatorBasis([Identity()]) if basis is None else basis
-    g = observables(u, basis, homogeneous)
+    kept = [k[idx] for k, idx in zip(u.wavenumbers(), kept_indices(BlockCutoffFilter(block_size=1), u))]
+    if g is None:
+        g = observables(u, basis, homogeneous)
+    else:
+        n_wavevectors, M = int(np.prod([len(k) for k in kept])), len(operators) * int(np.prod(u.component_shape))
+        expected = (*u.lead_shape, n_wavevectors, M) if homogeneous else (*u.lead_shape, 1, n_wavevectors * M)
+        if g.shape != expected:
+            raise ValueError(f"the observables of u and {len(operators)} operators must have the shape {expected}, got {g.shape}.")
     C = two_time_correlations(g, n_lags, origins)
-    features = u if basis is None else basis.stack(u)
-    kept = [k[idx] for k, idx in zip(features.wavenumbers(), kept_indices(BlockCutoffFilter(block_size=1), features))]
     return MemoryKernels(
         correlations=C,
         kernels=memory_kernels(C, rcond),
@@ -161,5 +175,6 @@ class MoriKernels(InferenceMethod):
     def fit(self, field: Field, basis: OperatorBasis) -> CouplingsForOperators:
         return self.fit_kernels(field, basis).markov()
 
-    def fit_kernels(self, field: Field, basis: OperatorBasis) -> MemoryKernels:
-        return mori_kernels_level(field, basis, self.homogeneous, self.n_lags, self.origins, self.rcond)
+    def fit_kernels(self, field: Field, basis: OperatorBasis, g: np.ndarray | None = None) -> MemoryKernels:
+        """g: the observables observables(field, basis, homogeneous) if they are already computed."""
+        return mori_kernels_level(field, basis, self.homogeneous, self.n_lags, self.origins, self.rcond, g=g)

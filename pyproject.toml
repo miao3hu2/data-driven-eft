@@ -22,6 +22,13 @@ dev = [
     "pytest",
     "ruff",
 ]
+posttrain = [
+    "accelerate>=1.15.0",
+    "datasets>=5.1.0",
+    "peft>=0.21.2",
+    "transformers>=5.22.1",
+    "trl>=1.17.1",
+]
 
 [tool.pyright]
 typeCheckingMode = "basic"

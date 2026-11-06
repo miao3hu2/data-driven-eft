@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# outputs of experiment runs: model checkpoints, logs
-experiments/*/runs/
+# outputs of runs: model checkpoints, logs
+runs/

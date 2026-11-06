@@ -148,7 +148,7 @@ def test_verify_checks_a_proposal_without_enumerating_the_bases():
     assert v.passed == (not v.failures) and v.passed == (v.local_gain <= 1e-6 and v.beats_baseline)
     text = v.report()
     assert "rank" in text and "check: " in text and "greedy baseline" in text and "best known" in text
-    assert json.dumps(v.summary())  # the loop and train.py save it
+    assert json.dumps(v.summary())  # the loop saves it
     again = verify("burgers", "<basis>u**2</basis>", size=TINY, measure=False, search=search,
                    greedy_baseline=baseline("burgers", size=TINY, search=search))
     assert again.n_evaluated == 0 and again.passed == v.passed  # every basis was evaluated before

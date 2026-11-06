@@ -21,7 +21,7 @@ from posttrain.tasks import SIZES, Task, split
 @dataclass
 class TrainConfig:
     model: str = "Qwen/Qwen2.5-0.5B-Instruct"  # the base model: a Hugging Face hub id or a local path
-    output_dir: str = "experiments/06_llm_posttrain/runs/demo"
+    output_dir: str = "runs/demo"
     size: str = "demo"  # environment size, a key of tasks.SIZES
     hints: Hints = "relevance"   # how much diagnostic information the prompt shows (prompts.py)
     system_role: bool = True  # False for chat templates without a system role

@@ -113,7 +113,7 @@ class LoopConfig:
     check: CheckConfig = field(default_factory=CheckConfig)  # what a basis must pass to end a session
     check_seed: int = VERIFY_SEED  # the ensemble of the check, whose verdict the model is told
     final_seed: int = FINAL_SEED  # the ensemble of the final verification, never seen by the loop
-    output_dir: str = "experiments/06_llm_posttrain/runs/loop"
+    output_dir: str = "runs/loop"
     reward: RewardConfig = field(default_factory=RewardConfig)
 
 

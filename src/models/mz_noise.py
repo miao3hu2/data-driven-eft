@@ -142,7 +142,7 @@ class RNNNoise:
 
 
 def fit_rnn_noise(u: Field, kernels: MemoryKernels, d_h: int = 2, degree_sigma: int = 3, degree_A: int = 2, iters: int = 1500, lr: float = 2e-2, seed: int = 0, log=None, mean_options: dict | None = None) -> RNNNoise:
-    """The noise of u (the training field at the closure's level) under the given kernels: first its mean (fit_mean), then
+    """The noise of u (the fit trajectories at the level of the effective dynamics) under the given kernels: first its mean (fit_mean), then
     the stochastic RNN on the residuals of trajectories the mean did not see, by maximum
     likelihood with full-batch Adam and a cosine learning rate."""
     g, W = orthogonal_noise(u, kernels)
@@ -191,13 +191,14 @@ def simulate(u: Field, kernels: MemoryKernels, noise: RNNNoise | None = None, n_
     return path.reshape(n_samples, batch, length, -1)
 
 
-def energy_score(samples: np.ndarray, truth: np.ndarray) -> float:
-    """The energy score E|X - y| - E|X - X'|/2 of an ensemble (n_samples, batch, n_x) at each truth (batch, n_x), averaged
-    over the batch and relative to |y|: a proper score of the whole forecast distribution, lower is better."""
+def ensemble_error(samples: np.ndarray, truth: np.ndarray) -> float:
+    """The energy score of the forecasting literature, E|X - y| - E|X - X'|/2, of an ensemble (n_samples, batch, n_x) at each
+    truth (batch, n_x), relative to |y| and averaged over the batch: a proper score of the whole forecast distribution,
+    lower is better; for one sample, its relative error."""
     n = len(samples)
-    skill = np.linalg.norm(samples - truth, axis=-1).mean(axis=0)
-    spread = sum(np.linalg.norm(samples[i] - samples[j], axis=-1) for i in range(n) for j in range(n)) / (2 * n * n)
-    return float(np.mean((skill - spread) / np.linalg.norm(truth, axis=-1)))
+    dist_truth = np.linalg.norm(samples - truth, axis=-1).mean(axis=0)
+    dist_pairs = sum(np.linalg.norm(samples[i] - samples[j], axis=-1) for i in range(n) for j in range(n)) / (n * n)
+    return float(np.mean((dist_truth - dist_pairs / 2) / np.linalg.norm(truth, axis=-1)))
 
 
 def spectrum(u: np.ndarray) -> np.ndarray:
@@ -207,11 +208,12 @@ def spectrum(u: np.ndarray) -> np.ndarray:
 
 
 def evaluate(u: Field, kernels: MemoryKernels, noise: dict[str, RNNNoise], n_samples: int = 16, seed: int = 0) -> dict[str, dict[str, float]]:
-    """Statistics of the closure without noise (no_noise) and of the stochastic closure with each noise model on the held-out
+    """Statistics of the deterministic effective dynamics (no_noise) and of the stochastic effective dynamics with each noise model on the scoring
     trajectories u, over the predicted times:
 
         error           relative L2 error of the ensemble mean, as KernelEnvironment.rollout_error
-        energy_score    of the ensemble, relative to |u| (for one trajectory without noise: its relative error)
+        ensemble_error  of the ensemble at each time (the energy score, relative to |u|), averaged over the times
+                        (for one trajectory without noise: its mean relative error)
         spread_skill    ensemble spread over the error of its mean: 1 for a calibrated ensemble, 0 without noise
         spectrum_error  mean |log(simulated power / true power)| over the modes and times: energy lost or gained
         blowups         fraction of trajectories that diverge
@@ -229,11 +231,11 @@ def evaluate(u: Field, kernels: MemoryKernels, noise: dict[str, RNNNoise], n_sam
         norm = np.linalg.norm(y, axis=(0, 2))
         error = np.linalg.norm(mean - y, axis=(0, 2)) / norm
         spread = np.sqrt(np.mean(np.sum((p - mean) ** 2, axis=(1, 3)), axis=0)) / norm
-        scores = [energy_score(p[:, :, t], y[:, t]) for t in range(y.shape[1])]
+        scores = [ensemble_error(p[:, :, t], y[:, t]) for t in range(y.shape[1])]
         sim_spectrum = spectrum(p)
         out[name] = {
             "error": float(error.mean()),
-            "energy_score": float(np.mean(scores)),
+            "ensemble_error": float(np.mean(scores)),
             "spread_skill": float(spread.mean() / error.mean()),
             "spectrum_error": float(np.mean(np.abs(np.log(sim_spectrum[keep] / truth_spectrum[keep])))),
             "blowups": float(1 - finite.mean()),

@@ -2,8 +2,8 @@
 A small language for local operators of a scalar field in 1, 2 or 3 dimensions, safe to use on text written by a
 language model.
 
-An operator is a polynomial in u and its partial derivatives, written with Dx, Dy, Dz for d/dx, d/dy, d/dz (D is
-d/dx, the 1D spelling):
+An operator is a polynomial in u and its partial derivatives, of any degree and any derivative order, written with Dx,
+Dy, Dz for d/dx, d/dy, d/dz (D is d/dx, the 1D spelling):
 
     "D(D(u))"                  u_xx, also "D(u,2)" or "Dx(u,2)"
     "D(u**2)"                  (u^2)_x, which is 2 u u_x
@@ -15,11 +15,20 @@ The text is parsed with Python's ast module and only a whitelist of nodes is acc
 as code. The parsed expression is expanded with sympy (product rule included) into a sum of monomials in u and its
 derivatives u_x, u_y, u_xx, u_xy, ..., and normalized so that its first coefficient is 1: an operator is defined up
 to the scale of its coupling, so "D(u**2)" and "2*u*D(u)" are the same operator.
+
+The language assumes nothing about the degree or the derivative order. An expression is rejected only if it is not
+well defined: not an operator of the language, zero, a constant, or too large to evaluate (more than MAX_TERMS terms
+once expanded). The bounds of the finite pool a search goes through (all_monomials) are separate: POOL_DEGREE and
+POOL_ORDER.
 """
 
 import ast
+import functools
 import itertools
+import math
+from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 import sympy
@@ -27,9 +36,10 @@ import sympy
 from core.data.base import Field
 from core.operators.base import Operator
 
-MAX_DEGREE = 3
-MAX_ORDER = 4
-MAX_LENGTH = 200
+MAX_LENGTH = 200  # characters of an expression
+MAX_TERMS = 1000  # monomials an expression may expand into: beyond, it is too large to evaluate
+POOL_DEGREE = 3  # the finite pool of monomials a search goes through (all_monomials): degree at most 3,
+POOL_ORDER = 4  # and total derivative order at most 4. These bound the pool, not the language.
 AXES = "xyz"
 
 _X = sympy.symbols(" ".join(AXES))
@@ -41,15 +51,29 @@ def _multi_indices(order: int, n_space: int) -> list[tuple[int, ...]]:
     return sorted((a for a in itertools.product(range(order + 1), repeat=n_space) if sum(a) == order), reverse=True)
 
 
-# the factors a monomial is a product of: u and its partial derivatives, by total order then x first. A monomial's
-# powers are indexed like ATOMS, so for operators in x alone the order of the terms and the names are those of the
-# 1D language (the derivatives along y and z have power 0 and do not change any comparison).
-ATOMS: list[tuple[int, ...]] = [a for n in range(MAX_ORDER + 1) for a in _multi_indices(n, len(AXES))]
-_ATOM_NAMES = ["u" if not any(a) else "u_" + "".join(ax * p for ax, p in zip(AXES, a)) for a in ATOMS]
-# the powers as the canonical order of terms compares them: as ATOMS, but z first within each derivative order, so that
-# of two terms alike up to the axes the one along x comes first (u_xx + u_yy). Atoms in x alone keep their relative
-# order, so the 1D order is unchanged.
-_SORT_ATOMS = sorted(range(len(ATOMS)), key=lambda i: (sum(ATOMS[i]), ATOMS[i]))
+# An atom is a factor a monomial is a product of: u or one of its partial derivatives, as the number of derivatives
+# along each axis (x, y, z): (0, 0, 0) is u, (2, 0, 0) is u_xx, (1, 1, 0) is u_xy. Atoms are ordered by total order,
+# then x first; a monomial lists its atoms in that order.
+Atom = tuple[int, ...]
+_U_ATOM: Atom = (0,) * len(AXES)
+
+
+def atom_order(atom: Atom) -> tuple:
+    """The canonical order of atoms: by total derivative order, then x first."""
+    return sum(atom), tuple(-p for p in atom)
+
+
+def _sort_rank(atom: Atom) -> tuple:
+    """The order in which the canonical order of terms compares atoms: by total order, but z first within an order,
+    so that of two terms alike up to the axes the one along x comes first (u_xx + u_yy). Atoms in x alone keep their
+    relative order, so the 1D order is unchanged."""
+    return sum(atom), atom
+
+
+def atom_name(atom: Atom) -> str:
+    return "u" if not any(atom) else "u_" + "".join(ax * p for ax, p in zip(AXES, atom))
+
+
 _DERIVATIVES = {"D": 0, **{f"D{ax}": i for i, ax in enumerate(AXES)}}
 
 
@@ -62,61 +86,93 @@ class OperatorSyntaxError(ValueError):
     pass
 
 
-def _to_sympy(node):
+def _to_sympy(node) -> tuple:
+    """The sympy expression of an AST node, with bounds on what it expands into: (expression, number of monomials,
+    degree). The bounds are checked before sympy expands or differentiates anything, so that a short text such as
+    "(u + D(u))**500" is rejected at once instead of being expanded."""
     if isinstance(node, ast.Name) and node.id == "u":
-        return _U
+        return _U, 1, 1
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
-        return sympy.nsimplify(node.value)
+        return sympy.nsimplify(node.value), 1, 0
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
-        value = _to_sympy(node.operand)
-        return -value if isinstance(node.op, ast.USub) else value
+        value, terms, degree = _to_sympy(node.operand)
+        return (-value if isinstance(node.op, ast.USub) else value), terms, degree
     if isinstance(node, ast.BinOp):
-        left, right = _to_sympy(node.left), _to_sympy(node.right)
+        (left, n_left, d_left), (right, n_right, d_right) = _to_sympy(node.left), _to_sympy(node.right)
         if isinstance(node.op, ast.Add):
-            return left + right
+            return left + right, n_left + n_right, max(d_left, d_right)
         if isinstance(node.op, ast.Sub):
-            return left - right
+            return left - right, n_left + n_right, max(d_left, d_right)
         if isinstance(node.op, ast.Mult):
-            return left * right
+            return left * right, _bounded(n_left * n_right), d_left + d_right
         if isinstance(node.op, ast.Div):
             if not right.is_number or right == 0:
                 raise OperatorSyntaxError("division only by a nonzero number")
-            return left / right
+            return left / right, n_left, d_left
         if isinstance(node.op, ast.Pow):
-            if not (right.is_Integer and 1 <= right <= MAX_DEGREE):
-                raise OperatorSyntaxError(f"exponents must be integers between 1 and {MAX_DEGREE}")
-            return left**right
+            if not (right.is_Integer and right >= 1):
+                raise OperatorSyntaxError("exponents must be positive integers")
+            n = int(right)
+            # the monomials of degree n in n_left terms
+            return left**right, _bounded(math.comb(n + n_left - 1, n_left - 1)), d_left * n
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _DERIVATIVES
             and not node.keywords):
         axis = _X[_DERIVATIVES[node.func.id]]
         if len(node.args) == 1:
-            return sympy.diff(_to_sympy(node.args[0]), axis)
-        if len(node.args) == 2 and isinstance(node.args[1], ast.Constant) and type(node.args[1].value) is int:
+            order = 1
+        elif len(node.args) == 2 and isinstance(node.args[1], ast.Constant) and type(node.args[1].value) is int:
             order = node.args[1].value
-            if not 1 <= order <= MAX_ORDER:
-                raise OperatorSyntaxError(f"derivative order must be between 1 and {MAX_ORDER}")
-            return sympy.diff(_to_sympy(node.args[0]), axis, order)
+            if order < 1:
+                raise OperatorSyntaxError("derivative order must be a positive integer")
+        else:
+            raise OperatorSyntaxError(f"not allowed: {ast.dump(node)[:80]}")
+        value, terms, degree = _to_sympy(node.args[0])
+        # by the product rule, the n-th derivative of a product of `degree` factors has comb(n + degree - 1, degree - 1)
+        # terms
+        terms = _bounded(terms * math.comb(order + max(degree, 1) - 1, max(degree, 1) - 1))
+        return sympy.diff(value, axis, order), terms, degree
+    if isinstance(node, (ast.Tuple, ast.List)):
+        raise OperatorSyntaxError("a list, not one operator")
     raise OperatorSyntaxError(f"not allowed: {ast.dump(node)[:80]}")
+
+
+def _bounded(terms: int) -> int:
+    if terms > MAX_TERMS:
+        raise OperatorSyntaxError(f"too large to evaluate: it expands into more than {MAX_TERMS} terms")
+    return terms
 
 
 @dataclass(frozen=True)
 class Monomial:
     coefficient: float
-    powers: tuple[int, ...]  # power of each factor of ATOMS (u, u_x, u_y, u_z, u_xx, u_xy, ...) in this term
+    factors: tuple[tuple[Atom, int], ...]  # (atom, power >= 1) of each factor of the term, atoms in atom_order
 
     @property
     def degree(self) -> int:
-        return sum(self.powers)
+        return sum(p for _, p in self.factors)
 
     @property
     def order(self) -> int:
         """Total number of derivatives in the term."""
-        return sum(sum(a) * p for a, p in zip(ATOMS, self.powers))
+        return sum(sum(a) * p for a, p in self.factors)
 
     @property
     def n_space(self) -> int:
         """The number of axes the term needs."""
-        return max(atom_n_space(a) for a, p in zip(ATOMS, self.powers) if p)
+        return max(atom_n_space(a) for a, _ in self.factors)
+
+
+def _compare_terms(m1: Monomial, m2: Monomial) -> int:
+    """The canonical order of the terms of an operator: by degree, then derivative order, then the powers of the atoms
+    compared one by one in _sort_rank order, a lower power first."""
+    if (m1.degree, m1.order) != (m2.degree, m2.order):
+        return -1 if (m1.degree, m1.order) < (m2.degree, m2.order) else 1
+    p1, p2 = dict(m1.factors), dict(m2.factors)
+    for atom in sorted(set(p1) | set(p2), key=_sort_rank):
+        a, b = p1.get(atom, 0), p2.get(atom, 0)
+        if a != b:
+            return -1 if a < b else 1
+    return 0
 
 
 def parse(text: str, normalize: bool = True) -> list[Monomial]:
@@ -128,36 +184,34 @@ def parse(text: str, normalize: bool = True) -> list[Monomial]:
         tree = ast.parse(text.strip(), mode="eval")
     except SyntaxError as e:
         raise OperatorSyntaxError(f"cannot parse {text!r}") from e
-    expr = sympy.expand(_to_sympy(tree.body))
-    symbols = sympy.symbols(f"a0:{len(ATOMS)}")
+    expr = sympy.expand(_to_sympy(tree.body)[0])
+    atom_of = lambda d: tuple(int(dict(d.variable_count).get(x, 0)) for x in _X)  # Python ints, not sympy's
+    atoms = [_U_ATOM] + sorted({atom_of(d) for d in expr.atoms(sympy.Derivative)}, key=atom_order)
+    symbols = sympy.symbols(f"a0:{len(atoms)}")
     replacements = {_U: symbols[0]}
     for d in expr.atoms(sympy.Derivative):
-        atom = tuple(d.variables.count(x) for x in _X)
-        if sum(atom) > MAX_ORDER:
-            raise OperatorSyntaxError(f"derivative order above {MAX_ORDER} in {text!r}")
-        replacements[d] = symbols[ATOMS.index(atom)]
+        replacements[d] = symbols[atoms.index(atom_of(d))]
     # xreplace swaps whole subexpressions, so U inside a derivative is not touched by the U -> a0 replacement
     expr = expr.xreplace(replacements)
     if expr.free_symbols - set(symbols):
         raise OperatorSyntaxError(f"unknown symbol in {text!r}")
     poly = sympy.Poly(expr, *symbols)
-    terms = [Monomial(float(c), tuple(int(p) for p in powers)) for powers, c in poly.terms() if c != 0]
+    terms = [Monomial(float(c), tuple((atoms[i], int(p)) for i, p in enumerate(powers) if p))
+             for powers, c in poly.terms() if c != 0]
     if not terms:
         raise OperatorSyntaxError(f"{text!r} is zero")
     if any(m.degree == 0 for m in terms):
         raise OperatorSyntaxError("constant terms are not allowed")
-    if any(m.degree > MAX_DEGREE for m in terms):
-        raise OperatorSyntaxError(f"polynomial degree above {MAX_DEGREE}")
     # canonical order: by degree, then derivative order, then powers; first coefficient normalized to 1
-    terms.sort(key=lambda m: (m.degree, m.order, tuple(m.powers[i] for i in _SORT_ATOMS)))
+    terms.sort(key=functools.cmp_to_key(_compare_terms))
     lead = terms[0].coefficient if normalize else 1.0
-    return [Monomial(m.coefficient / lead, m.powers) for m in terms]
+    return [Monomial(m.coefficient / lead, m.factors) for m in terms]
 
 
 def canonical_name(monomials: list[Monomial]) -> str:
     parts = []
     for m in monomials:
-        factors = [_ATOM_NAMES[i] + (f"^{p}" if p > 1 else "") for i, p in enumerate(m.powers) if p]
+        factors = [atom_name(a) + (f"^{p}" if p > 1 else "") for a, p in m.factors]
         c = m.coefficient
         coef = "" if abs(c - 1) < 1e-12 else ("-" if abs(c + 1) < 1e-12 else f"{c:.4g} ")
         parts.append(coef + " ".join(factors))
@@ -187,10 +241,9 @@ class SymbolicOperator(Operator):
         return max(m.n_space for m in self.monomials)
 
     @property
-    def atoms(self) -> list[tuple[int, ...]]:
-        """The distinct factors (u and its derivatives) the operator is a polynomial in, in the order of ATOMS."""
-        used = {i for m in self.monomials for i, p in enumerate(m.powers) if p}
-        return [ATOMS[i] for i in sorted(used)]
+    def atoms(self) -> list[Atom]:
+        """The distinct factors (u and its derivatives) the operator is a polynomial in, in atom_order."""
+        return sorted({a for m in self.monomials for a, _ in m.factors}, key=atom_order)
 
     @property
     def parity(self) -> int:
@@ -209,21 +262,26 @@ class SymbolicOperator(Operator):
         return out.to_fourier() if field.domain == "fourier" else out
 
 
-def _nyquist_on_fine_grid(m: int, axis: int, d: int) -> tuple[tuple, tuple]:
-    """The indices of the modes +m/2 and -m/2, along one of the d spatial axes of a grid twice as fine as an even m."""
-    tail = (slice(None),) * (d - 1 - axis)
-    return (Ellipsis, m // 2, *tail), (Ellipsis, 3 * m // 2, *tail)
+def _on_axis(index: int, axis: int, d: int) -> tuple:
+    """The index of one position along one of the d spatial axes (the last d axes of an array)."""
+    return (Ellipsis, index, *(slice(None),) * (d - 1 - axis))
+
+
+def padding(degree: int) -> int:
+    """How many times finer than u the grid of the products is: ceil((degree + 1) / 2), at least 2. Then the modes of a
+    product of `degree` factors that fold back onto the modes of u land on its Nyquist mode only."""
+    return max(2, -(-(degree + 1) // 2))
 
 
 def evaluate_monomials(monomials: list[Monomial], u: np.ndarray, scale: float | tuple[float, ...]) -> np.ndarray:
     """Sum of monomials of u (..., m_1, ..., m_d) on its periodic grid, the spatial axes last and scale the grid
-    spacing along each (a number for d = 1), dealiased: derivatives spectrally, products on a grid twice as fine along
-    every axis, then truncated back to the modes of u.
+    spacing along each (a number for d = 1), dealiased: derivatives spectrally, products on a grid padding(degree)
+    times as fine along every axis (twice up to degree 3), then truncated back to the modes of u.
 
     On an even axis, the Nyquist mode of the grid is both +m/2 and -m/2. It is split equally between them on the fine
-    grid, which makes u a real function with real derivatives, and the two are added back on the way down, so that this
-    mode of the result is the true product sampled on the grid: it includes the modes +-3m/2 of a cubic term, which the
-    grid cannot tell from it. The modes below it are exactly those of the true product."""
+    grid, which makes u a real function with real derivatives, and every mode of the fine grid that the grid of u cannot
+    tell from it (+-m/2, +-3m/2, ...) is added back on the way down, so that this mode of the result is the true product
+    sampled on the grid. The modes below it are exactly those of the true product."""
     spacing = [float(dx) for dx in np.atleast_1d(scale)]
     d = len(spacing)
     if d > len(AXES):
@@ -232,35 +290,36 @@ def evaluate_monomials(monomials: list[Monomial], u: np.ndarray, scale: float | 
         raise ValueError(f"the monomials differentiate along more axes than the {d} of the grid.")
     axes = tuple(range(-d, 0))
     shape = u.shape[-d:]
-    fine_shape = u.shape[:-d] + tuple(2 * m for m in shape)
-    # where each mode of u sits on the grid twice as fine
-    modes = np.ix_(*[np.rint(np.fft.fftfreq(m, 1 / m)).astype(int) % (2 * m) for m in shape])
+    f = padding(max(mono.degree for mono in monomials))
+    fine_shape = u.shape[:-d] + tuple(f * m for m in shape)
+    # where each mode of u sits on the finer grid
+    modes = np.ix_(*[np.rint(np.fft.fftfreq(m, 1 / m)).astype(int) % (f * m) for m in shape])
     padded = np.zeros(fine_shape, dtype=complex)
     padded[(Ellipsis, *modes)] = np.fft.fftn(u, axes=axes)
     even = [(m, i) for i, m in enumerate(shape) if m % 2 == 0]
-    for m, i in even:
-        positive, negative = _nyquist_on_fine_grid(m, i, d)
+    for m, i in even:  # +m/2 sits at m/2 on the finer grid, -m/2 at f m - m/2
+        positive, negative = _on_axis(m // 2, i, d), _on_axis(f * m - m // 2, i, d)
         padded[negative] /= 2
         padded[positive] = padded[negative]
-    # the wavenumbers of the fine grid tell +m/2 from -m/2
-    k_grid = np.meshgrid(*[2 * np.pi * np.fft.fftfreq(2 * m, d=dx / 2) for m, dx in zip(shape, spacing)], indexing="ij")
-    used = sorted({i for mono in monomials for i, p in enumerate(mono.powers) if p})
+    # the wavenumbers of the finer grid tell +m/2 from -m/2
+    k_grid = np.meshgrid(*[2 * np.pi * np.fft.fftfreq(f * m, d=dx / f) for m, dx in zip(shape, spacing)], indexing="ij")
     fine = {}
-    for i in used:
-        symbol = np.prod([(1j * k) ** p for k, p in zip(k_grid, ATOMS[i])], axis=0)
-        fine[i] = np.real(np.fft.ifftn(symbol * padded, axes=axes)) * 2**d
-    total = np.zeros(fine_shape)
-    for mono in monomials:
-        term = np.full(total.shape, mono.coefficient)
-        for i, p in enumerate(mono.powers):
-            if p:
-                term = term * fine[i] ** p
-        total += term
-    product = np.fft.fftn(total, axes=axes)
-    for m, i in even:
-        positive, negative = _nyquist_on_fine_grid(m, i, d)
-        product[negative] += product[positive]
-    out = product[(Ellipsis, *modes)] / 2**d
+    with np.errstate(over="ignore", invalid="ignore"):  # a derivative of high order may overflow: the result is not finite
+        for atom in sorted({a for mono in monomials for a, _ in mono.factors}, key=atom_order):
+            symbol = np.prod([(1j * k) ** p for k, p in zip(k_grid, atom)], axis=0)
+            fine[atom] = np.real(np.fft.ifftn(symbol * padded, axes=axes)) * f**d
+        total = np.zeros(fine_shape)
+        for mono in monomials:
+            term = np.full(total.shape, mono.coefficient)
+            for atom, p in mono.factors:
+                term = term * fine[atom] ** p
+            total += term
+        product = np.fft.fftn(total, axes=axes)
+    for m, i in even:  # every mode congruent to m/2 modulo m folds onto the Nyquist mode, at the index of -m/2
+        negative = _on_axis(f * m - m // 2, i, d)
+        for j in range(f - 1):
+            product[negative] += product[_on_axis(j * m + m // 2, i, d)]
+    out = product[(Ellipsis, *modes)] / f**d
     return np.real(np.fft.ifftn(out, axes=axes))
 
 
@@ -276,15 +335,45 @@ def _atom_text(atom: tuple[int, ...], n_space: int) -> str:
     return text
 
 
-def all_monomials(n_space: int = 1) -> list[str]:
-    """Every monomial of the DSL on n_space axes: products of at most MAX_DEGREE derivatives of total order at most
-    MAX_ORDER. For n_space = 1, the derivatives along x alone, written with D."""
+def all_monomials(n_space: int = 1, max_degree: int = POOL_DEGREE, max_order: int = POOL_ORDER) -> list[str]:
+    """Every monomial on n_space axes of degree at most max_degree and total derivative order at most max_order: the
+    finite pool a search goes through. For n_space = 1, the derivatives along x alone, written with D."""
     if not 1 <= n_space <= len(AXES):
         raise ValueError(f"n_space must be between 1 and {len(AXES)}.")
-    atoms = [a for a in ATOMS if atom_n_space(a) <= n_space]
+    atoms = [a for n in range(max_order + 1) for a in _multi_indices(n, len(AXES)) if atom_n_space(a) <= n_space]
     out = []
-    for degree in range(1, MAX_DEGREE + 1):
+    for degree in range(1, max_degree + 1):
         for factors in itertools.combinations_with_replacement(atoms, degree):
-            if sum(sum(a) for a in factors) <= MAX_ORDER:
+            if sum(sum(a) for a in factors) <= max_order:
                 out.append("*".join(_atom_text(a, n_space) for a in factors))
     return out
+
+
+def compact_monomial(text: str) -> str:
+    """A monomial of all_monomials as a model would write it, the same operator: "u*u*D(u,1)" is "u**2*D(u)"."""
+    factors = Counter(text.replace("D(u,1)", "D(u)").split("*"))
+    return "*".join(factor if n == 1 else f"{factor}**{n}" for factor, n in factors.items())
+
+
+@lru_cache(maxsize=None)
+def _x_derivative_name(text: str, n: int) -> str | None:
+    """The canonical name of the n-th x-derivative of an operator; None if it is too large to evaluate or zero."""
+    try:
+        return SymbolicOperator(f"D({text},{n})").name
+    except OperatorSyntaxError:
+        return None
+
+
+def is_x_derivative(op: SymbolicOperator, other: SymbolicOperator) -> bool:
+    """Whether op is an x-derivative of other, up to a factor: "u*D(u)" is one of "u**2". Each x-derivative raises the
+    derivative order by one, so the only candidate is the derivative of order op.order - other.order."""
+    n = op.order - other.order
+    return n >= 1 and op.degree == other.degree and op.name == _x_derivative_name(other.text, n)
+
+
+def distinct_monomials(basis: tuple[SymbolicOperator, ...] | list[SymbolicOperator] = ()) -> list[SymbolicOperator]:
+    """The nonlinear monomials, each observable once in its cheapest form ("u**2", not "u*D(u)"), leaving out the
+    observables of the basis."""
+    pool = [op for op in (SymbolicOperator(compact_monomial(text)) for text in all_monomials()) if op.degree > 1]
+    pool = [op for op in pool if not any(is_x_derivative(op, other) for other in pool)]
+    return [op for op in pool if not any(op.name == b.name or is_x_derivative(op, b) or is_x_derivative(b, op) for b in basis)]

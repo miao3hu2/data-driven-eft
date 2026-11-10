@@ -6,9 +6,9 @@ from core.operators.symbolic import SymbolicOperator
 from models.mz_noise import evaluate, fit_mean, fit_rnn_noise, orthogonal_noise, simulate
 from models.orthogonal_dynamics import MeanNetwork
 from models.stochastic_rnn import StochasticRNN
-from posttrain.tasks import EnvSize, environment, task
+from posttrain.tasks import EnvSize, environment, sized, task
 
-TINY = EnvSize(n=64, n_time=9, fit=(1, 2), heldout=3, n_train=20, n_test=10)
+TINY = EnvSize(n=64, n_time=9, fit=(1, 2), predict=3, n_fit=20, n_score=10)
 
 
 def _net():
@@ -42,24 +42,24 @@ def test_the_mean_is_translation_equivariant():
 
 
 @pytest.fixture(scope="module")
-def closure():
-    env = environment(task("burgers"), TINY)
+def effective_dynamics():
+    env = environment(sized([task("burgers")], TINY)[0])
     return env, env.extrapolated_kernels([SymbolicOperator("u**2")])
 
 
-def test_the_deterministic_simulation_is_the_closure_the_loop_scores(closure):
-    env, kernels = closure
-    level, h = env.levels.heldout, kernels.n_lags
-    stats = evaluate(env.u_test[level], kernels, {}, n_samples=1)["no_noise"]
+def test_the_deterministic_simulation_is_the_effective_dynamics_the_loop_scores(effective_dynamics):
+    env, kernels = effective_dynamics
+    level, h = env.levels.predict, kernels.n_lags
+    stats = evaluate(env.u_score[level], kernels, {}, n_samples=1)["no_noise"]
     assert stats["error"] == pytest.approx(env.rollout_error(kernels, level), rel=1e-10)
     assert stats["spread_skill"] == 0 and stats["blowups"] == 0
-    path = simulate(env.u_test[level], kernels)[0]
-    np.testing.assert_allclose(path[:, :h], env.u_test[level].values[:, :h])
+    path = simulate(env.u_score[level], kernels)[0]
+    np.testing.assert_allclose(path[:, :h], env.u_score[level].values[:, :h])
 
 
-def test_the_noise_is_what_the_drift_leaves(closure):
-    env, kernels = closure
-    u = env.u[env.levels.heldout]
+def test_the_noise_is_what_the_drift_leaves(effective_dynamics):
+    env, kernels = effective_dynamics
+    u = env.u[env.levels.predict]
     g, W = orthogonal_noise(u, kernels)
     h = kernels.n_lags
     assert W.shape == (u.values.shape[0], u.values.shape[1] - h, g.shape[2])
@@ -137,11 +137,11 @@ def test_given_the_latent_the_path_of_the_rnn_is_deterministic():
     assert (rnn.path(rnn.latent(2, 5, torch.Generator().manual_seed(2))) - first).abs().max() > 0
 
 
-def test_the_rnn_closure_is_fixed_by_the_initial_states_and_the_latent(closure):
-    env, kernels = closure
-    u = env.u_test[env.levels.heldout]
+def test_the_stochastic_effective_dynamics_is_fixed_by_the_initial_states_and_the_latent(effective_dynamics):
+    env, kernels = effective_dynamics
+    u = env.u_score[env.levels.predict]
     h = kernels.n_lags
-    fitted = fit_rnn_noise(env.u[env.levels.heldout], kernels, degree_A=1, iters=30, mean_options=dict(folds=2, iters=5))
+    fitted = fit_rnn_noise(env.u[env.levels.predict], kernels, degree_A=1, iters=30, mean_options=dict(folds=2, iters=5))
     assert fitted.losses[-1] < fitted.losses[0]
     W = fitted.sample(np.zeros((2, h, u.values.shape[-1], 2)), 4, torch.Generator().manual_seed(0))
     n = W.shape[-1]
@@ -154,9 +154,9 @@ def test_the_rnn_closure_is_fixed_by_the_initial_states_and_the_latent(closure):
     assert evaluate(u, kernels, {"rnn": fitted}, n_samples=2)["rnn"]["blowups"] == 0
 
 
-def test_the_mean_of_the_noise_is_cross_fitted_and_fixed_by_the_initial_states(closure):
-    env, kernels = closure
-    train, u = env.u[env.levels.heldout], env.u_test[env.levels.heldout]
+def test_the_mean_of_the_noise_is_cross_fitted_and_fixed_by_the_initial_states(effective_dynamics):
+    env, kernels = effective_dynamics
+    train, u = env.u[env.levels.predict], env.u_score[env.levels.predict]
     h = kernels.n_lags
     fitted = fit_rnn_noise(train, kernels, iters=10, mean_options=dict(folds=2, iters=5))
     mean = fitted.mean

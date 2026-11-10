@@ -1,12 +1,11 @@
 from dataclasses import dataclass, field
 
-from posttrain.prompts import Hints
-from posttrain.reward import RewardConfig, Score, parse_basis, score_basis
+from posttrain.reward import RewardConfig, Score, read_reply, score_basis
 from posttrain.search import SearchConfig, SearchResult, greedy, known, local_search, nonlinear_monomials, reward
 from posttrain.speed import measure_speedup
-from posttrain.tasks import DEMO, REWARD_SEED, SIZES, VERIFY_SEED, EnvSize, Task, environment, task
+from posttrain.tasks import REWARD_SEED, VERIFY_SEED, Task, as_task, environment
 
-__all__ = ["CheckConfig", "Verification", "baseline", "verify", "verify_model", "nonlinear_monomials"]
+__all__ = ["CheckConfig", "Verification", "baseline", "verify", "nonlinear_monomials"]
 
 
 @dataclass(frozen=True)
@@ -32,7 +31,7 @@ class Verification:
     found: bool  # whether the reply has a <basis> block; without one the proposal is scored as u alone
     check: CheckConfig = field(default_factory=CheckConfig)
     n_evaluated: int = 0  # bases this verification evaluated, not evaluated on this ensemble before
-    closure_seconds: float | None = None  # per snapshot interval
+    effective_seconds: float | None = None  # wall time of the effective dynamics per snapshot interval
     simulation_seconds: float | None = None
     rivals: list[Score] = field(default_factory=list)  # the best bases of the rival ensembles, on this ensemble
 
@@ -68,9 +67,9 @@ class Verification:
 
     @property
     def speedup(self) -> float | None:
-        if self.closure_seconds is None or self.simulation_seconds is None:
+        if self.effective_seconds is None or self.simulation_seconds is None:
             return None
-        return self.simulation_seconds / self.closure_seconds
+        return self.simulation_seconds / self.effective_seconds
 
     def summary(self) -> dict:
         """The verification as JSON-serializable values."""
@@ -80,7 +79,7 @@ class Verification:
                     failures=self.failures, 
                     found=self.found,
                     invalid=self.invalid, 
-                    basis=list(self.proposal.names), heldout_error=self.proposal.heldout_error,
+                    basis=list(self.proposal.names), error=self.proposal.error,
                     relative_cost=self.proposal.relative_cost, 
                     reward=reward(self.proposal), 
                     rank=self.rank,
@@ -102,7 +101,7 @@ class Verification:
                   True: "Pareto optimal among them",
                   False: f"dominated by {len(self.dominated_by)} of them"}[self.pareto_optimal]
         lines = [
-            f"{self.task}: proposal {_basis(p)}: held-out error {p.heldout_error:.4f}, cost x{p.relative_cost:.2f} "
+            f"{self.task}: proposal {_basis(p)}: error {p.error:.4f}, cost x{p.relative_cost:.2f} "
             f"of u alone, reward {reward(p):+.3f}; rank {self.rank} of {self.n_known + 1} known bases, {pareto}",
             "  check: " + ("passed" if self.passed else "failed, " + "; ".join(self.failures)),
             ("  local optimum: no single move improves it" if loc.gain <= self.check.tol else
@@ -110,15 +109,15 @@ class Verification:
              f"{reward(loc.best):+.3f} ({loc.gain:+.3f})"),
             (f"  greedy baseline {_basis(g)}: reward {reward(g):+.3f}, "
              + ("beaten or matched" if self.beats_baseline else "better than the proposal")),
-            (f"  best known: {_basis(b)}: held-out error {b.heldout_error:.4f}, cost x{b.relative_cost:.2f}, "
+            (f"  best known: {_basis(b)}: error {b.error:.4f}, cost x{b.relative_cost:.2f}, "
              f"reward {reward(b):+.3f}"),
         ]
         if self.found and self.invalid:
             lines.insert(1, f"  {len(self.invalid)} unusable lines, ignored: " + "; ".join(self.invalid))
-        closure, simulation = self.closure_seconds, self.simulation_seconds
-        if closure is not None and simulation is not None:
-            lines.append(f"  closure {closure * 1e3:.2f} ms per snapshot, direct simulation {simulation * 1e3:.1f} ms: "
-                         f"{simulation / closure:.0f} times faster")
+        effective, simulation = self.effective_seconds, self.simulation_seconds
+        if effective is not None and simulation is not None:
+            lines.append(f"  effective dynamics {effective * 1e3:.2f} ms per snapshot, direct simulation {simulation * 1e3:.1f} ms: "
+                         f"{simulation / effective:.0f} times faster")
         return "\n".join(lines)
 
 
@@ -126,15 +125,14 @@ def _basis(s: Score) -> str:
     return "[" + ", ".join(("u", *s.names)) + "]"
 
 
-def baseline(task_name: str, config: RewardConfig = RewardConfig(), size: EnvSize = DEMO, seed: int = VERIFY_SEED, search: SearchConfig = SearchConfig()) -> SearchResult:
+def baseline(task: "Task | str", config: RewardConfig = RewardConfig(), seed: int = VERIFY_SEED, search: SearchConfig = SearchConfig()) -> SearchResult:
     """Greedy forward selection on the ensemble of the check; the loop computes it once per task and reuses it."""
-    return greedy(environment(task(task_name), size, seed), config, search)
+    return greedy(environment(task, seed), config, search)
 
 
-def verify(task_name: str, 
+def verify(task: "Task | str",
            reply: str, 
            config: RewardConfig = RewardConfig(), 
-           size: EnvSize = DEMO,
            seed: int = VERIFY_SEED, 
            measure: bool = True, 
            search: SearchConfig = SearchConfig(),
@@ -142,16 +140,16 @@ def verify(task_name: str,
            greedy_baseline: SearchResult | None = None,
            rival_seeds: tuple[int, ...] = (REWARD_SEED,)
            ) -> Verification:
-    t = task(task_name)
-    env = environment(t, size, seed)
+    t = as_task(task)
+    env = environment(t, seed)
     before = env.n_evaluations
-    basis = parse_basis(reply, config.max_ops)
+    basis = read_reply(reply, config, env)
     proposal = score_basis(env, basis.ops, config)
     rivals: dict[tuple[str, ...], Score] = {}
     for rival_seed in rival_seeds:  # a repeated seed offers the same bases again: skipped below, at no cost
         if rival_seed == seed:
             continue
-        other = environment(t, size, rival_seed)
+        other = environment(t, rival_seed)
         for s in known(other, config)[:search.rivals]:
             if s.names not in rivals:
                 rivals[s.names] = score_basis(env, [other.operators[name] for name in s.names], config)
@@ -159,21 +157,21 @@ def verify(task_name: str,
         greedy_baseline = greedy(env, config, search)
     elif greedy_baseline.start != score_basis(env, [], config):
         raise ValueError(f"greedy_baseline was not computed on this ensemble (seed {seed}): its start, u alone, has "
-                         f"held-out error {greedy_baseline.start.heldout_error:.6g} instead of "
-                         f"{env.evaluate([]).heldout_error:.6g}")
+                         f"error {greedy_baseline.start.error:.6g} instead of "
+                         f"{env.evaluate([]).error:.6g}")
     local = local_search(env, basis.ops, config, search)
     known_here = {**rivals, **greedy_baseline.scored, **local.scored}
     others = [s for names, s in known_here.items() if names != proposal.names]
     verification = Verification(
-        task=task_name,
+        task=t.name,
         seed=seed,
         proposal=proposal,
         best=max([proposal, *others], key=reward),
         rank=1 + sum(reward(s) > reward(proposal) for s in others),
         n_known=len(others),
-        dominated_by=[s for s in others if s.heldout_error <= proposal.heldout_error
+        dominated_by=[s for s in others if s.error <= proposal.error
                       and s.relative_cost <= proposal.relative_cost
-                      and (s.heldout_error < proposal.heldout_error or s.relative_cost < proposal.relative_cost)],
+                      and (s.error < proposal.error or s.relative_cost < proposal.relative_cost)],
         baseline=greedy_baseline,
         local=local,
         invalid=basis.invalid,
@@ -183,26 +181,6 @@ def verify(task_name: str,
         rivals=list(rivals.values()),
     )
     if measure:
-        verification.closure_seconds, verification.simulation_seconds = measure_speedup(env, basis.ops)
+        verification.effective_seconds, verification.simulation_seconds = measure_speedup(env, basis.ops)
     return verification
 
-
-def verify_model(policy, 
-                 tokenizer, 
-                 tasks: list[Task], 
-                 size: str = "demo", 
-                 hints: Hints = "relevance",
-                 system_role: bool = True, 
-                 config: RewardConfig = RewardConfig(),
-                 search: SearchConfig = SearchConfig(), 
-                 max_new_tokens: int = 256,
-                 check: CheckConfig = CheckConfig()
-                 ) -> list[tuple[str, Verification]]:
-    """The greedy reply of a model to every task, verified: [(reply, verification)]."""
-    from posttrain.grpo import propose
-
-    out = []
-    for t in tasks:
-        reply = propose(policy, tokenizer, t, n=1, size=size, hints=hints, system_role=system_role, max_new_tokens=max_new_tokens)[0]
-        out.append((reply, verify(t.name, reply, config, SIZES[size], search=search, check=check)))
-    return out

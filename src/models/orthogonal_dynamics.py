@@ -1,7 +1,7 @@
 """
-The network of the predictable part of the noise of a Mori-Zwanzig closure (mz_noise.MeanNoise).
+The network of the predictable part of the noise of a Mori-Zwanzig effective dynamics (mz_noise.MeanNoise).
 
-W is fixed by the full initial state, but the closure knows only part of that state, x. So W splits in two:
+W is fixed by the full initial state, but the effective dynamics knows only part of that state, x. So W splits in two:
 
     W(n) = m(x, n) + eta(n)
 

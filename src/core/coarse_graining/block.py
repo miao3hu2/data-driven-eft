@@ -25,7 +25,7 @@ class MajorityBlockSpin(CoarseGrainer):
             )
         new_spatial_dims = [d // self.block_size for d in field.spatial_shape]
 
-        # Split every spatial axis n into (n // b, b): (*lead, n1, b, n2, b, ..., *components)
+        # Split every spatial axis n into (n // block_size, block_size): (*lead, n1, block_size, n2, block_size, ..., *components)
         blocked_shape = list(field.lead_shape)
         for d in new_spatial_dims:
             blocked_shape += [d, self.block_size]

@@ -52,3 +52,36 @@ def test_energy_change_matches_manual_calculation():
     # site (1, 0): s=-1, periodic neighbors are spins[2,0]=1, spins[0,0]=1,
     # spins[1,1]=1, spins[1,3]=-1 -> nn sum = 2 -> dE = 2*2*(-1)*2 = -8
     assert model.energy_change(spins, 1, 0) == -8.0
+
+
+def _bond_energy(field):
+    from core.operators.ising import NearestNeighbor
+
+    return NearestNeighbor().evaluate(field).values.mean()
+
+
+def test_swendsen_wang_samples_the_same_distribution_as_metropolis():
+    clusters = Ising2D(L=8, beta=0.4, seed=0).sample_clusters(n_samples=400, sweeps=30)
+    metropolis = Ising2D(L=8, beta=0.4, seed=1).sample(n_samples=400, burn_in=200, thinning=5)
+    assert clusters.values.shape == (400, 8, 8) and np.all(np.isin(clusters.values, [-1, 1]))
+    assert _bond_energy(clusters) == pytest.approx(_bond_energy(metropolis), abs=0.04)
+
+
+def test_swendsen_wang_orders_at_low_temperature_and_not_at_high():
+    cold = Ising2D(L=16, beta=0.7, seed=0).sample_clusters(n_samples=50, sweeps=20).values
+    hot = Ising2D(L=16, beta=0.2, seed=0).sample_clusters(n_samples=50, sweeps=20).values
+    assert np.abs(cold.mean(axis=(1, 2))).mean() > 0.95
+    assert np.abs(hot.mean(axis=(1, 2))).mean() < 0.2
+
+
+def test_pseudo_likelihood_recovers_the_coupling_and_agrees_with_infer_k1():
+    from core.inference.ising import InferK1, PseudoLikelihood
+    from core.operators.base import OperatorBasis
+    from core.operators.ising import NearestNeighbor, NextNearestNeighbor
+
+    samples = Ising2D(L=16, beta=0.35, seed=0).sample_clusters(n_samples=200, sweeps=30)
+    k1 = PseudoLikelihood().fit(samples, OperatorBasis([NearestNeighbor()]))["K1"]
+    assert k1 == pytest.approx(0.35, abs=0.02)
+    assert k1 == pytest.approx(InferK1().fit(samples, OperatorBasis([NearestNeighbor()]))["K1"], abs=1e-3)
+    both = PseudoLikelihood().fit(samples, OperatorBasis([NearestNeighbor(), NextNearestNeighbor()]))
+    assert both["K1"] == pytest.approx(0.35, abs=0.03) and abs(both["K2"]) < 0.03  # the true Hamiltonian has no K2

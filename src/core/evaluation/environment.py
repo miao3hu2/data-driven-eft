@@ -18,8 +18,8 @@ from core.operators.symbolic import SymbolicOperator
 @dataclass(frozen=True)
 class Levels:
     fit: tuple[int, ...] = (1, 2, 3, 4)  # levels the model is fitted at; level n has block size 2^n
-    heldout: int = 5  # the level the flow is extrapolated to and scored at
-    n_extrapolation_levels: int = 3  # number of fit levels used to extrapolate to the held-out level
+    predict: int = 5  # the level the flow is extrapolated to and scored at
+    n_extrapolation_levels: int = 3  # number of fit levels used to extrapolate to the prediction scale
 
 
 class Dynamics(Protocol):
@@ -68,8 +68,8 @@ class Environment(ABC, Generic[E]):
         self,
         dynamics: Dynamics | None = None,
         levels: Levels | None = None,
-        n_train: int = 400,
-        n_test: int = 200,
+        n_fit: int = 400,
+        n_score: int = 200,
         seed: int = 0,
         cost: float = 0.05,  # score cost per operator
         max_error: float = 2.0,  # rollout errors are capped here; a blow-up scores like an error of max_error
@@ -78,12 +78,12 @@ class Environment(ABC, Generic[E]):
         self.dynamics = Burgers() if dynamics is None else dynamics
         self.levels = Levels() if levels is None else levels
         self.cost, self.max_error = cost, max_error
-        self.seed, self.n_train, self.n_test = seed, n_train, n_test  # training ensemble from seed, held-out from seed + 1
-        u, _ = self.dynamics.ensemble(seed, n_train)
-        u_test, _ = self.dynamics.ensemble(seed + 1, n_test)
-        all_levels = self.levels.fit + (self.levels.heldout,)
+        self.seed, self.n_fit, self.n_score = seed, n_fit, n_score  # fit trajectories from seed, scoring trajectories from seed + 1
+        u, _ = self.dynamics.ensemble(seed, n_fit)
+        u_score, _ = self.dynamics.ensemble(seed + 1, n_score)
+        all_levels = self.levels.fit + (self.levels.predict,)
         self.u = {n: coarse(u, n) for n in all_levels}
-        self.u_test = {self.levels.heldout: coarse(u_test, self.levels.heldout)}
+        self.u_score = {self.levels.predict: coarse(u_score, self.levels.predict)}
         self.method = MoriKernels(homogeneous=True, n_lags=n_lags, origins="all")
         self._kernels: dict[tuple[frozenset, int], MemoryKernels] = {}
         self._operator_modes: dict[tuple[str, int], np.ndarray] = {}
@@ -131,7 +131,7 @@ class Environment(ABC, Generic[E]):
         return OperatorBasis([Identity(), *ops])
 
     def kernels(self, ops: list[SymbolicOperator], level: int) -> MemoryKernels:
-        """Omega^(0..n_lags-1) at a level, fitted on the training set by MoriKernels, u and the operators; cached."""
+        """Omega^(0..n_lags-1) at a level, fitted on the fit trajectories by MoriKernels, u and the operators; cached."""
         key = (frozenset(op.name for op in ops), level)
         if key not in self._kernels:
             g = self.basis_modes(ops, level)
@@ -139,7 +139,7 @@ class Environment(ABC, Generic[E]):
         return self._kernels[key]
 
     def operator_modes(self, op: Operator, level: int) -> np.ndarray:
-        """The modes of one operator O(u) on the training set at a level, (batch, time, K), in the order of the kernels; read-only, cached. op is the Identity, for u itself, or a SymbolicOperator."""
+        """The modes of one operator O(u) on the fit trajectories at a level, (batch, time, K), in the order of the kernels; read-only, cached. op is the Identity, for u itself, or a SymbolicOperator."""
         key = (op.name, level)
         if isinstance(op, SymbolicOperator):
             self.operators.setdefault(op.name, op)
@@ -148,21 +148,21 @@ class Environment(ABC, Generic[E]):
         return self._operator_modes[key]
 
     def operator_power(self, op: Operator, level: int) -> np.ndarray:
-        """The power of the modes of one operator per time, sum over the batch of |O_k(t)|^2, on the training set at a level: (time, K). Read-only, cached."""
+        """The power of the modes of one operator per time, sum over the batch of |O_k(t)|^2, on the fit trajectories at a level: (time, K). Read-only, cached."""
         key = (op.name, level)
         if key not in self._operator_power:
             self._operator_power[key] = read_only(np.sum(np.abs(self.operator_modes(op, level)) ** 2, axis=0))
         return self._operator_power[key]
 
     def basis_modes(self, ops: list[SymbolicOperator], level: int) -> np.ndarray:
-        """The modes of every operator of the basis (Identity, *ops), the observables g = (u, O_1(u), ...), on the training set at a level: (batch, time, K, 1 + len(ops)), column i from operator_modes of operator i. ops as in kernels. Read-only, cached for the last basis_modes_cache_size bases and levels."""
+        """The modes of every operator of the basis (Identity, *ops), the observables g = (u, O_1(u), ...), on the fit trajectories at a level: (batch, time, K, 1 + len(ops)), column i from operator_modes of operator i. ops as in kernels. Read-only, cached for the last basis_modes_cache_size bases and levels."""
         def stack() -> np.ndarray:
             return np.stack([self.operator_modes(op, level) for op in self.basis(ops).operators], axis=-1)
 
         return self._recent(self._basis_modes, (tuple(op.name for op in ops), level), self.basis_modes_cache_size, stack)
 
     def noise(self, ops: list[SymbolicOperator], level: int) -> np.ndarray:
-        """W(t) = g(t) - sum_l Omega^(l) g(t-1-l) on the training set at a level, for every t after the first n_lags states: (batch, time - n_lags, K, M). ops as in kernels. Read-only, cached for the last noise_cache_size bases and levels."""
+        """W(t) = g(t) - sum_l Omega^(l) g(t-1-l) on the fit trajectories at a level, for every t after the first n_lags states: (batch, time - n_lags, K, M). ops as in kernels. Read-only, cached for the last noise_cache_size bases and levels."""
         def compute() -> np.ndarray:
             kernels, g = self.kernels(ops, level), self.basis_modes(ops, level)
             h = kernels.n_lags
@@ -172,7 +172,7 @@ class Environment(ABC, Generic[E]):
         return self._recent(self._noise, (tuple(op.name for op in ops), level), self.noise_cache_size, compute)
 
     def gram_inverse(self, ops: list[SymbolicOperator], level: int) -> np.ndarray:
-        """The pseudo-inverse of the Gram matrix <g_i, g_j> per wavevector of the observables g = (u, ops) on the training set at a level, over the batch and every time: (K, M, M). ops as in kernels. Read-only, cached."""
+        """The pseudo-inverse of the Gram matrix <g_i, g_j> per wavevector of the observables g = (u, ops) on the fit trajectories at a level, over the batch and every time: (K, M, M). ops as in kernels. Read-only, cached."""
         key = (tuple(op.name for op in ops), level)
         if key not in self._gram_inverse:
             g = self.basis_modes(ops, level)

@@ -30,6 +30,26 @@ def monomial_pool(ops: list[SymbolicOperator]) -> list[SymbolicOperator]:
 
 
 SPACES: dict[str, Pool] = {"finite": monomial_pool}  # "infinite": a generator of operators, to come in the future
+# A pool registered here under a new name is searched with SearchConfig(space=name), e.g. the pool of a Family.
+
+
+@dataclass(frozen=True)
+class Family:
+    """A family of operators given by features rather than listed: the finite set a greedy search goes through once a
+    model, not the code, has narrowed the space down (the future design: the model writes the features, greedy picks
+    the basis inside the family). Today it filters the monomials of the DSL; the default family is all of them."""
+    degrees: tuple[int, ...] = (2, 3)  # polynomial degrees in u
+    max_order: int = 4  # total derivative order, e.g. 2 for u*D(u,2) and D(u)**2
+    sign: Literal["even", "odd"] | None = None  # under u -> -u: even or odd degree; None for both
+    mirror: Literal["even", "odd"] | None = None  # under x -> -x: even or odd total derivative order; None for both
+
+    def admits(self, op: SymbolicOperator) -> bool:
+        parity = lambda n: "even" if n % 2 == 0 else "odd"
+        return (op.degree in self.degrees and op.order <= self.max_order
+                and self.sign in (None, parity(op.degree)) and self.mirror in (None, parity(op.order)))
+
+    def pool(self) -> Pool:
+        return lambda ops: [op for op in monomial_pool(ops) if self.admits(op)]
 
 
 def pool_of(space: str) -> Pool:

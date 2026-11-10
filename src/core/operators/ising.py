@@ -17,6 +17,11 @@ class NearestNeighbor(Operator):
 
         return field.replace(values=np.asarray(bonds))
 
+    def local_field(self, field: Field) -> np.ndarray:
+        """dO/ds_i at every site, the sum of its nearest neighbours: the field the operator puts on one spin."""
+        x = field.values
+        return sum(np.roll(x, 1, axis=axis) + np.roll(x, -1, axis=axis) for axis in field.spatial_axes)
+
 
 class NextNearestNeighbor(Operator):
 
@@ -38,3 +43,12 @@ class NextNearestNeighbor(Operator):
         )
 
         return field.replace(values=np.asarray(bonds))
+
+    def local_field(self, field: Field) -> np.ndarray:
+        """dO/ds_i at every site, the sum of its diagonal neighbours."""
+        x = field.values
+        return sum(
+            np.roll(x, shift, axis=axes)
+            for axes in combinations(field.spatial_axes, 2)
+            for shift in ((1, 1), (-1, -1), (1, -1), (-1, 1))
+        )

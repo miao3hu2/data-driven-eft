@@ -11,9 +11,9 @@ from core.inference.mori_kernels import observables
 from core.operators.base import Identity
 from core.operators.symbolic import SymbolicOperator, all_monomials
 
-# a small ensemble: 64 points, levels 1 and 2 (31 and 15 points) to fit, level 3 (7 points) held out
+# a small ensemble: 64 points, levels 1 and 2 (31 and 15 points) to fit, level 3 (7 points) to predict
 SMALL = Burgers(n=64, n_time=9)
-LEVELS = Levels(fit=(1, 2), heldout=3, n_extrapolation_levels=2)
+LEVELS = Levels(fit=(1, 2), predict=3, n_extrapolation_levels=2)
 
 
 def ops(*texts):
@@ -22,7 +22,7 @@ def ops(*texts):
 
 @pytest.fixture(scope="module")
 def kernel_env():
-    return KernelEnvironment(SMALL, LEVELS, n_train=60, n_test=20)
+    return KernelEnvironment(SMALL, LEVELS, n_fit=60, n_score=20)
 
 
 def test_burgers_derivatives_match_the_trajectories():
@@ -51,18 +51,18 @@ def test_symbolic_operators_are_defined_up_to_their_coupling():
 def test_kernel_env_linear_operators_only_cost(kernel_env):
     """u is always an observable and u_x is proportional to it mode by mode: same rollout, minus the cost."""
     alone, with_gradient = kernel_env.evaluate([]), kernel_env.evaluate(ops("D(u)"))
-    assert with_gradient.heldout_error == pytest.approx(alone.heldout_error, rel=1e-8)
+    assert with_gradient.error == pytest.approx(alone.error, rel=1e-8)
     assert with_gradient.score == pytest.approx(alone.score - kernel_env.cost, rel=1e-8)
 
 
 def test_kernel_env_operators_are_defined_up_to_derivatives(kernel_env):
     """u u_x = (u^2)_x / 2 is proportional to u^2 at every wavevector."""
     square, advection = kernel_env.evaluate(ops("u**2")), kernel_env.evaluate(ops("u*D(u)"))
-    assert advection.heldout_error == pytest.approx(square.heldout_error, rel=1e-8)
+    assert advection.error == pytest.approx(square.error, rel=1e-8)
 
 
 def test_kernel_env_u_alone_does_not_flow(kernel_env):
-    """The held-out modes of u are the same at every level, and so are their kernels."""
+    """The modes of the prediction scale of u are the same at every level, and so are their kernels."""
     e = kernel_env.evaluate([])
     assert e.kernels.shape == (2, kernel_env.method.n_lags, 7, 1, 1)
     np.testing.assert_allclose(e.kernels[0], e.kernels[1], atol=1e-12)
@@ -174,15 +174,15 @@ class Diffusion2D:
 
 
 def test_kernel_env_in_2d_matches_wavevectors_in_both_axes():
-    # the decay differs along x and y, so matching the held-out wavevectors by one axis, or a wrong mode order in the
+    # the decay differs along x and y, so matching the wavevectors of the prediction scale by one axis, or a wrong mode order in the
     # rollout, would put the wrong kernel on a mode
     dyn = Diffusion2D()
-    env = KernelEnvironment(dyn, LEVELS, n_train=20, n_test=10, cost=0.0)
+    env = KernelEnvironment(dyn, LEVELS, n_fit=20, n_score=10, cost=0.0)
     ev = env.evaluate([])
-    k = env.k_heldout
+    k = env.k_predict
     assert k.shape == (9, 2)  # 32 points at level 3: 3 modes per axis
     exact = np.exp(-(dyn.a * k[:, 0] ** 2 + dyn.b * k[:, 1] ** 2) * dyn.dt)
     np.testing.assert_allclose(ev.direct[0, :, 0, 0], exact, atol=1e-10)
     np.testing.assert_allclose(ev.extrapolated[0, :, 0, 0], exact, atol=1e-10)
-    assert ev.heldout_error < 1e-8
+    assert ev.error < 1e-8
     assert "k=(1, 0)" in ev.describe()

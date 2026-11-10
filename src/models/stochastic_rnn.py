@@ -1,5 +1,5 @@
 """
-A stochastic recurrent network for the random part of the noise of a Mori-Zwanzig closure on non-stationary trajectories,
+A stochastic recurrent network for the random part of the noise of a Mori-Zwanzig effective dynamics on non-stationary trajectories,
 one Fourier mode at a time, with a distribution that changes in time.
 
 The noise splits as W(n) = m(x, n) + eta(n), where m is its mean given the known initial states x (orthogonal_dynamics.py).
@@ -10,7 +10,7 @@ eta has zero mean, and is random because the unresolved initial data is unknown.
 
     A_k(n) = sum_j A_kj tau^j,   log sigma_k(n) = sum_j s_kj tau^j,   tau = min(n / (T - 1), 1)
 
-n counts the steps since the initial time of the closure and T is the length of the training paths.
+n counts the steps since the initial time of the effective dynamics and T is the length of the training paths.
 
 xi0, xi and eps are standard Gaussians, circular complex ones, real ones on the real modes.
 """

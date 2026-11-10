@@ -7,7 +7,8 @@ import sympy
 
 from core.data.base import Field
 from core.data.polynomial_pde import PolynomialPDE
-from core.operators.symbolic import ATOMS, OperatorSyntaxError, SymbolicOperator, all_monomials, evaluate_monomials, parse
+from core.operators.symbolic import (MAX_TERMS, OperatorSyntaxError, SymbolicOperator, all_monomials, evaluate_monomials,
+                                     is_x_derivative, padding, parse)
 
 X, Y, Z = sympy.symbols("x y z")
 
@@ -56,12 +57,23 @@ def test_n_space_order_and_parity_of_nd_operators():
     assert SymbolicOperator("u**2").n_space == 1 and SymbolicOperator("Dy(u)*u").n_space == 2
 
 
-def test_total_derivative_order_is_limited_per_factor():
-    SymbolicOperator("Dx(Dy(u,2),2)")
-    with pytest.raises(OperatorSyntaxError):
-        SymbolicOperator("Dx(Dy(u,2),3)")
-    with pytest.raises(OperatorSyntaxError):
-        SymbolicOperator("Dw(u)")
+def test_the_language_assumes_no_degree_or_derivative_order():
+    for text, (degree, order) in {"Dx(Dy(u,2),3)": (1, 5), "u**4": (4, 0), "u**2*D(u)**2": (4, 2), "D(u,12)*u": (2, 12),
+                                  "u**9 + D(u,6)**3": (9, 18)}.items():
+        op = SymbolicOperator(text)
+        assert (op.degree, op.order) == (degree, order)
+    assert SymbolicOperator("D(u,6)").name == "u_xxxxxx" and SymbolicOperator("D(u**4)").name == "u^3 u_x"
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("Dw(u)", "not allowed"), ("u**0.5", "positive integers"), ("u**-1", "positive integers"), ("u/(1+u**2)", "division"),
+    ("D(u,0)", "positive integer"), ("u - u", "zero"), ("3", "constant"), ("u + 1", "constant"), ("tanh(u)", "not allowed"),
+    ("(u + D(u) + D(u,2))**50", "too large"), ("D(u**4*D(u)**2, 30)", "too large"), ("x*u", "not allowed"),
+])
+def test_only_operators_that_are_not_well_defined_are_rejected(text, reason):
+    with pytest.raises(OperatorSyntaxError, match=reason):
+        SymbolicOperator(text)
+    assert MAX_TERMS == 1000
 
 
 @pytest.mark.parametrize(
@@ -100,11 +112,11 @@ def test_products_are_dealiased_in_every_axis():
     np.testing.assert_allclose(SymbolicOperator("u**2").evaluate(field).values[0], expected, atol=1e-12)
 
 
-def _exact_term(powers, modes, lengths):
+def _exact_term(factors, modes, lengths):
     """The Fourier coefficients {k: value} of a product of derivatives of u, by direct convolution of the coefficients
     `modes` of u: there is no grid, so there can be no aliasing."""
     product = {(0,) * len(lengths): 1.0}
-    for atom, power in zip(ATOMS, powers):
+    for atom, power in factors:
         factor = {k: c * np.prod([(2j * np.pi * ki / L) ** a for ki, L, a in zip(k, lengths, atom)])
                   for k, c in modes.items()}
         for _ in range(power):
@@ -122,6 +134,9 @@ def _exact_term(powers, modes, lengths):
     ((33,), (2.7,), "u*D(u,2) + 0.5*D(u)**2"), ((32,), (2.7,), "u*D(u)*D(u,2) - 2*D(u,4)"),
     ((12, 13), (2.7, 1.9), "u**3"), ((12, 12), (2.7, 1.9), "u*Dx(u)*Dy(u)"), ((13, 12), (2.7, 1.9), "Dx(Dy(u))*u**2"),
     ((12, 12), (2.7, 1.9), "u**3"),
+    # beyond degree 3 the products need a finer grid (padding)
+    ((16,), (2.7,), "u**4"), ((15,), (2.7,), "u**5 - D(u)**2*u**2"), ((16,), (2.7,), "u**3*D(u,2)**2"),
+    ((8, 8), (2.7, 1.9), "u**4"), ((16,), (2.7,), "D(u,6)*u"),
 ])
 def test_products_of_the_highest_modes_match_the_exact_convolution(shape, lengths, text):
     # white noise fills every mode up to and including Nyquist, the hardest case for aliasing
@@ -138,7 +153,7 @@ def test_products_of_the_highest_modes_match_the_exact_convolution(shape, length
     monomials = parse(text)
     expected = np.zeros(shape, dtype=complex)
     for monomial in monomials:
-        for k, c in _exact_term(monomial.powers, modes, lengths).items():
+        for k, c in _exact_term(monomial.factors, modes, lengths).items():
             # below Nyquist, the exact mode; at Nyquist, all the modes the grid cannot tell from it (the sampled value)
             if all(2 * abs(ki) < m or (m % 2 == 0 and ki % m == m // 2) for ki, m in zip(k, shape)):
                 expected[tuple(ki % m for ki, m in zip(k, shape))] += monomial.coefficient * c
@@ -308,3 +323,21 @@ def test_operators_on_fields_with_batch_and_time_match_formulas_written_by_hand(
     assert op.name == name
     _close_to(op.evaluate(field).values, by_hand(u, ux, uxx))
     _close_to(op.evaluate(field.to_fourier()).to_real().values, by_hand(u, ux, uxx))
+
+
+def test_the_products_are_dealiased_for_any_degree_and_up_to_degree_3_as_before():
+    assert [padding(d) for d in (1, 2, 3, 4, 5, 6, 7)] == [2, 2, 2, 3, 3, 4, 4]
+
+
+def test_an_x_derivative_is_found_at_any_order():
+    op = lambda text: SymbolicOperator(text)
+    assert is_x_derivative(op("u*D(u)"), op("u**2")) and is_x_derivative(op("D(u**2, 7)"), op("u**2"))
+    assert is_x_derivative(op("D(u**4*D(u), 3)"), op("u**4*D(u)"))
+    assert not is_x_derivative(op("u**2"), op("u*D(u)")) and not is_x_derivative(op("u*D(u,2)"), op("u**2"))
+
+
+def test_a_derivative_of_high_order_that_overflows_gives_a_non_finite_value_without_warnings():
+    x = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    with np.errstate(all="raise"):
+        values = evaluate_monomials(parse("D(u,400)"), np.sin(3 * x) + 0.1 * np.cos(15 * x), x[1])
+    assert not np.all(np.isfinite(values))
